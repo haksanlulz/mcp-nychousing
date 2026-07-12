@@ -1,0 +1,89 @@
+#!/usr/bin/env -S npx tsx
+// Live smoke test: one real call per tool against the NYC Open Data (SODA) API.
+//
+// SODA is KEYLESS, so this runs with no setup. An optional NYC_APP_TOKEN only
+// raises the rate limit. Targets: 1520 Sedgwick Avenue in the Bronx for the
+// building tools, and borough-level Bronx queries for litigation and evictions.
+//
+//   npm run smoke
+//
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createServer } from "./server.js";
+
+function parse(result: any) {
+  if (result?.isError) throw new Error(result.content?.[0]?.text ?? "tool returned isError");
+  return JSON.parse(result.content[0].text);
+}
+
+async function main(): Promise<void> {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createServer();
+  const client = new Client({ name: "smoke", version: "1.0.0" }, { capabilities: {} });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  console.log(`smoke: live SODA calls (keyless${process.env.NYC_APP_TOKEN ? "; app token set" : ""})\n`);
+
+  let failed = 0;
+  const check = async (name: string, args: Record<string, unknown>, ok: (b: any) => boolean, describe: (b: any) => string) => {
+    try {
+      const body = parse(await client.callTool({ name, arguments: args }));
+      if (ok(body)) console.log(`ok   ${name}\n     -> ${describe(body)}`);
+      else {
+        failed++;
+        console.error(`FAIL ${name}: unexpected shape\n${JSON.stringify(body).slice(0, 300)}`);
+      }
+    } catch (e: any) {
+      failed++;
+      console.error(`FAIL ${name}: ${e.message}`);
+    }
+  };
+
+  const bldg = { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" };
+
+  await check(
+    "building_violations",
+    { ...bldg, limit: 3 },
+    (b) => b.summary && typeof b.summary.total_matching === "number" && Array.isArray(b.results),
+    (b) => `${b.summary.total_matching} violation(s); by class ${JSON.stringify(b.summary.by_class)}; showing ${b.returned}`,
+  );
+
+  await check(
+    "building_complaints",
+    { ...bldg, limit: 3 },
+    (b) => b.summary && typeof b.summary.total_matching === "number" && Array.isArray(b.results),
+    (b) => `${b.summary.total_matching} problem(s); by status ${JSON.stringify(b.summary.by_status)}; showing ${b.returned}`,
+  );
+
+  await check(
+    "who_owns",
+    bldg,
+    (b) => b.found === true && Array.isArray(b.registrations) && b.registrations.length > 0 && Array.isArray(b.contacts) && b.contacts.length > 0,
+    (b) => `reg ${b.registrations[0]?.registration_id}; ${b.contacts.length} contact(s); types ${Object.keys(b.contacts_by_type).join(", ")}`,
+  );
+
+  await check(
+    "landlord_litigation",
+    { borough: "Bronx", respondent: "realty", limit: 3 },
+    (b) => Array.isArray(b.results) && b.summary && typeof b.summary.returned === "number",
+    (b) => `${b.returned} case(s); first respondent: ${b.results[0]?.respondent ?? "(none)"}`,
+  );
+
+  await check(
+    "eviction_lookup",
+    { borough: "Bronx", limit: 3 },
+    (b) => Array.isArray(b.results),
+    (b) => `${b.returned} executed eviction(s); first: ${b.results[0]?.eviction_address ?? "(none)"} on ${b.results[0]?.executed_date ?? "?"}`,
+  );
+
+  await client.close();
+  await server.close();
+
+  console.log(failed === 0 ? "\nsmoke: all tools ok" : `\nsmoke: ${failed} tool(s) FAILED`);
+  process.exit(failed === 0 ? 0 : 1);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

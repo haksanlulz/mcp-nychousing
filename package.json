@@ -1,0 +1,48 @@
+{
+  "name": "mcp-nychousing",
+  "version": "1.0.0",
+  "description": "MCP server over NYC Open Data (Socrata/SODA) for NYC housing data: HPD violations, complaints, building ownership, HPD litigation, and marshal evictions, built for tenant organizers, housing-court legal aid, and Right-to-Counsel orgs.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Abishai James",
+  "bin": {
+    "mcp-nychousing": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "server.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "tsx index.ts",
+    "test": "vitest run",
+    "smoke": "tsx smoke.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "nyc-open-data",
+    "socrata",
+    "soda",
+    "hpd",
+    "housing",
+    "tenant-rights",
+    "evictions",
+    "legal-aid",
+    "civic-data"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
