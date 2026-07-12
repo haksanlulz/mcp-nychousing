@@ -1,6 +1,6 @@
 # mcp-nychousing
 
-MCP server for NYC housing data over [NYC Open Data](https://opendata.cityofnewyork.us/) (the Socrata / SODA API). Built for tenant organizers, housing-court legal-aid intake, and Right-to-Counsel orgs: pull a building's HPD violations and complaints, find out who actually owns it (to serve papers), check HPD litigation against the landlord, and look up marshal-executed evictions.
+MCP server for NYC housing data over [NYC Open Data](https://opendata.cityofnewyork.us/) (the Socrata / SODA API). Built for tenant organizers, housing-court legal-aid intake, and Right-to-Counsel orgs: pull a building's HPD violations and complaints, find out who actually owns it (to serve papers), map everything else registered under that owner or agent's name, check HPD litigation against the landlord, and look up marshal-executed evictions.
 
 It wraps six city datasets and normalizes their raw columns (`novdescription`, `violationstatus`, `registrationid`, `court_index_number`, and so on) into documented tool outputs.
 
@@ -11,6 +11,7 @@ It wraps six city datasets and normalizes their raw columns (`novdescription`, `
 | `building_violations` | `house_number`, `street`, `borough` (all required), `open_only`, `violation_class`, `since`, `limit` | HPD violations for a building (`wvxf-dwi5`). Server-side per-class count summary (A/B/C/I) plus recent rows: id, apartment, class, description, status, open flag, inspection date. |
 | `building_complaints` | `house_number`, `street`, `borough` (all required), `open_only`, `since`, `limit` | HPD complaints and problems for a building (`ygpa-z7cr`). Open/closed count summary plus recent rows: complaint id, category, status, dates. |
 | `who_owns` | `house_number`, `street`, `borough` (all required) | HPD registration (`tesw-yqqr`) joined to registration contacts (`feu5-w2e2`). Owner, head officer, officer, agent, and site manager, with names and business addresses, grouped by type. |
+| `landlord_portfolio` | `name` (required), `borough`, `limit` | Reverse of `who_owns`: registration contacts (`feu5-w2e2`) matched by corporation or person name, resolved to every currently registered building (`tesw-yqqr`). Address, borough, zip, BIN, registration dates, and which contact(s) matched, plus contact/registration/building counts. |
 | `landlord_litigation` | `house_number` + `street` + `borough`, and/or `respondent`, plus `case_status`, `limit` | HPD Housing Litigations (`59kj-x8nc`) by building or by respondent name. Case type, open date, status, judgement, harassment finding, penalty, respondent, with a by-status summary. |
 | `eviction_lookup` | `court_index_number`, and/or `address`, and/or `borough`, plus `since`, `limit` | Marshal-executed evictions (`6z8x-wfk4`) by court index number or address/borough. Index number, address, executed date, marshal, residential/commercial flag. |
 
@@ -21,7 +22,7 @@ It wraps six city datasets and normalizes their raw columns (`novdescription`, `
 - Base URL: `https://data.cityofnewyork.us/resource/<dataset-id>.json`
 - Auth: none. SODA is keyless. An optional Socrata app token (see below) only raises the per-IP rate limit.
 - Response: list and aggregate queries return a bare JSON array. Errors return `{ "error": true, "message": "..." }`.
-- Query language: SoQL via `$select`, `$where`, `$group`, `$order`, `$limit`, with `upper(...)` and `like` for string matching. All user text is escaped (a single quote becomes two) before it reaches a query.
+- Query language: SoQL via `$select`, `$where`, `$group`, `$order`, `$limit`, with `upper(...)` and `like` for string matching and `||` for the first/last-name concatenation in `landlord_portfolio`. All user text is escaped (a single quote becomes two) before it reaches a query.
 
 Dataset ids and column notes:
 
@@ -42,6 +43,7 @@ Dataset ids and column notes:
 | `class`, `rentimpairing`, `inspectiondate` | `class`, `rent_impairing`, `inspection_date` | building_violations |
 | `complaint_id`, `major_category`, `complaint_status`, `received_date` | `complaint_id`, `major_category`, `complaint_status`, `received_date` | building_complaints |
 | `registrationid`, `corporationname`, `firstname` + `lastname`, `business*` | `registration_id`, `organization`, `person_name`, `business_address` | who_owns |
+| `housenumber` + `streetname`, `boro`, `bin`, `lastregistrationdate` | `building_address`, `borough`, `bin`, `last_registration_date` (+ `matched_contacts`) | landlord_portfolio |
 | `litigationid`, `casetype`, `casestatus`, `penalty`, `respondent` | `litigation_id`, `case_type`, `case_status`, `penalty`, `respondent` | landlord_litigation |
 | `court_index_number`, `eviction_address`, `executed_date`, `marshal_*` | `court_index_number`, `eviction_address`, `executed_date`, `marshal_name` | eviction_lookup |
 
@@ -119,6 +121,35 @@ Call `building_violations` with `{ "house_number": "1520", "street": "Sedgwick A
 
 The counts are illustrative and move as the city updates the data. The `summary` counts every match server-side; `results` is the most recent `limit` of them.
 
+Then take a name from `who_owns` output and reverse it. Call `landlord_portfolio` with `{ "name": "WFHA 1520 SEDGWICK LP" }`:
+
+```json
+{
+  "query": { "name": "WFHA 1520 SEDGWICK LP", "borough": null },
+  "found": true,
+  "summary": { "contact_matches": 1, "distinct_registrations": 1, "buildings_found": 1 },
+  "note": "Contacts reflect HPD registration filings. The same landlord may file each building under a separate LLC; officer and agent person names often connect what the LLC names hide.",
+  "returned": 1,
+  "buildings": [
+    {
+      "registration_id": "221729",
+      "building_id": "108415",
+      "building_address": "1520 SEDGWICK AVENUE",
+      "borough": "BRONX",
+      "zip": "10453",
+      "bin": "2009171",
+      "last_registration_date": "2025-09-05T00:00:00.000",
+      "registration_end_date": "2026-09-01T00:00:00.000",
+      "matched_contacts": [
+        { "type": "CorporateOwner", "organization": "WFHA 1520 SEDGWICK LP", "person_name": null }
+      ]
+    }
+  ]
+}
+```
+
+A single-building LLC like this one is itself the common NYC pattern; searching an officer or agent person name from the same `who_owns` output is how you connect the buildings the per-building LLC names hide.
+
 ## Address matching
 
 There is no geocoding here. Address matching is literal against how HPD stores addresses:
@@ -126,7 +157,8 @@ There is no geocoding here. Address matching is literal against how HPD stores a
 - Street names are stored uppercase. The server uppercases and trims your `street` input and matches it as a substring (`upper(streetname) like '%YOUR STREET%'`). So `Sedgwick`, `sedgwick avenue`, and `SEDGWICK AVE` all match `SEDGWICK AVENUE`, but a very short input can over-match (`5 St` would also hit `125 St`). Pass the fuller street name when you can.
 - House number is matched exactly (uppercased), so `1520` is not `1516-1520`. Multi-address buildings can register under a range.
 - Borough disambiguates same-numbered streets across boroughs, so it is required for the building tools. Litigations store a numeric borough code; evictions mix borough and county spellings (Brooklyn and Kings, Manhattan and New York, Staten Island and Richmond), and the borough filter expands to all of them.
-- `who_owns`, `landlord_litigation`, and the datasets themselves reflect HPD filings, which can lag reality. Confirm anything you intend to act on (for example a name to serve) before relying on it.
+- `landlord_portfolio` matches names the same way: uppercase substring against `corporationname`, `firstname`, `lastname`, and the `firstname || ' ' || lastname` concatenation (so a pasted `person_name` from `who_owns` works). LIKE wildcards (`%`, `_`) in your input are escaped. Pass the fullest name you have; a short fragment like `SMITH` or `LLC` over-matches, and the response says how many contact records matched before any cap.
+- `who_owns`, `landlord_portfolio`, `landlord_litigation`, and the datasets themselves reflect HPD filings, which can lag reality. Confirm anything you intend to act on (for example a name to serve) before relying on it.
 
 ## Develop
 

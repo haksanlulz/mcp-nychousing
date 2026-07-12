@@ -1,6 +1,7 @@
 // mcp-nychousing: MCP server over NYC Open Data (Socrata / SODA) for NYC
 // housing data: HPD maintenance-code violations, complaints, building
-// ownership / registration, HPD-initiated litigation against landlords, and
+// ownership / registration, landlord portfolios (every building registered
+// under an owner/agent name), HPD-initiated litigation against landlords, and
 // marshal-executed evictions.
 //
 // Built for tenant organizers, housing-court legal-aid intake, and Right-to-
@@ -73,6 +74,12 @@ const THROTTLE_MS = 200;
 const REQUEST_TIMEOUT_MS = 15_000;
 /** Hard upper bound on rows returned by any single detail tool call. */
 const MAX_RESULTS = 500;
+/** Contact rows scanned per landlord_portfolio search; a response note reports
+ * when the server-side match count exceeds this. */
+const PORTFOLIO_SCAN_CAP = 1000;
+/** Registration ids per IN() chunk when resolving a portfolio to buildings
+ * (keeps each query URL well under length limits). */
+const PORTFOLIO_ID_CHUNK = 100;
 
 // ---------------------------------------------------------------------------
 // Auth (optional app token)
@@ -618,6 +625,34 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "landlord_portfolio",
+    description:
+      "The reverse of who_owns: every building currently registered with HPD under a given " +
+      "landlord, corporation, officer, or agent name. Searches HPD Registration Contacts " +
+      "(feu5-w2e2) for the name (case-insensitive substring against corporation names and person " +
+      "first/last names), then resolves each matched registration to its building (tesw-yqqr): " +
+      "address, borough, zip, BIN, registration dates, and which contact matched. Start from a " +
+      "name surfaced by who_owns or landlord_litigation. Landlords often hold each building in a " +
+      "separate LLC; officer and agent person names frequently connect buildings the LLC names hide. " +
+      "Reflects current HPD registration filings only. Keyless.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description:
+            'Owner / corporation / officer / agent name to match, e.g. "WFHA 1520 SEDGWICK LP" or ' +
+            '"JOHN WARREN" (case-insensitive substring against HPD registration-contact names; ' +
+            "pass the fullest name you have, short fragments over-match).",
+        },
+        borough: { type: "string", description: `Optional filter: only buildings in this borough. ${BOROUGH_DESC}` },
+        limit: { type: "integer", description: `Max buildings to return (1-${MAX_RESULTS}, default 50).` },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "landlord_litigation",
     description:
       "HPD Housing Litigations (dataset 59kj-x8nc): HPD-initiated cases against landlords plus " +
@@ -859,6 +894,163 @@ async function whoOwns(args: Row): Promise<unknown> {
   };
 }
 
+/**
+ * Contact-name match for landlord_portfolio: a case-insensitive substring
+ * against the corporation name, the first or last name alone, and the
+ * "FIRST LAST" concatenation, so a full person name pasted from who_owns
+ * output matches. The `||` concat operator works inside $where on feu5-w2e2
+ * (a NULL side makes that one clause NULL, never a false match; such rows
+ * still hit via the single-column clauses). All user text is
+ * quote- and LIKE-wildcard-escaped by likeCI.
+ */
+function contactNameWhere(name: string): string {
+  return (
+    "(" +
+    [
+      likeCI("corporationname", name),
+      likeCI("firstname", name),
+      likeCI("lastname", name),
+      likeCI("firstname || ' ' || lastname", name),
+    ].join(" OR ") +
+    ")"
+  );
+}
+
+async function landlordPortfolio(args: Row): Promise<unknown> {
+  const name = reqStr(args.name, "name");
+  const boro = str(args.borough) ? resolveBorough(args.borough) : null;
+  const limit = clampLimit(args.limit, 50);
+  const nameWhere = contactNameWhere(name);
+  const query = { name, borough: boro?.text ?? null };
+
+  // 1. Server-side count of matching contact records BEFORE any cap, so the
+  //    response reports the full match count and an empty result gets search
+  //    suggestions instead of a bare zero.
+  const countRows = await sodaGet(DATASET.contacts, { $select: "count(1) as n", $where: nameWhere });
+  const contactMatches = num(countRows[0]?.n) ?? 0;
+
+  if (contactMatches === 0) {
+    return {
+      query,
+      found: false,
+      summary: { contact_matches: 0, distinct_registrations: 0, buildings_found: 0 },
+      note:
+        `No HPD registration contact matched ${JSON.stringify(name)}. Names are stored UPPERCASE ` +
+        "and matched as substrings against corporation names and person first/last names. Try a " +
+        'shorter, distinctive part of the name (e.g. "SEDGWICK" instead of "WFHA 1520 SEDGWICK LP"), ' +
+        "take the exact spelling from who_owns on a building you know, or search landlord_litigation " +
+        "by respondent.",
+      returned: 0,
+      buildings: [],
+    };
+  }
+
+  // 2. Pull the matching contact rows (capped scan, deterministic order) and
+  //    dedupe registration ids, remembering which contact(s) matched for each.
+  const contactRows = await sodaGet(DATASET.contacts, {
+    $select: "registrationid,type,corporationname,firstname,lastname",
+    $where: nameWhere,
+    $order: "registrationid",
+    $limit: PORTFOLIO_SCAN_CAP,
+  });
+
+  const rolesByReg = new Map<number, Record<string, unknown>[]>();
+  for (const r of contactRows) {
+    const id = num(r.registrationid);
+    if (id == null) continue;
+    const c = normContact(r);
+    const role = { type: c.type, organization: c.organization, person_name: c.person_name };
+    const roles = rolesByReg.get(id) ?? [];
+    if (!roles.some((x) => x.type === role.type && x.organization === role.organization && x.person_name === role.person_name)) {
+      roles.push(role);
+    }
+    rolesByReg.set(id, roles);
+  }
+  const regIds = [...rolesByReg.keys()];
+
+  // 3. Resolve the ids to current registrations in IN() chunks (URL-length
+  //    bound), applying the optional borough filter server-side.
+  const buildings: Record<string, unknown>[] = [];
+  for (let i = 0; i < regIds.length; i += PORTFOLIO_ID_CHUNK) {
+    const chunk = regIds.slice(i, i + PORTFOLIO_ID_CHUNK);
+    const conditions = [inNum("registrationid", chunk)];
+    if (boro) conditions.push(eqText("boro", boro.text));
+    const rows = await sodaGet(DATASET.registrations, {
+      $where: whereAnd(conditions),
+      $limit: chunk.length,
+    });
+    for (const row of rows) {
+      const id = num(row.registrationid);
+      buildings.push({ ...normRegistration(row), matched_contacts: (id != null && rolesByReg.get(id)) || [] });
+    }
+  }
+  // Group the portfolio for reading: borough, then address.
+  buildings.sort((a, b) => {
+    const ka = `${a.borough ?? ""} ${a.building_address ?? ""}`;
+    const kb = `${b.borough ?? ""} ${b.building_address ?? ""}`;
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+
+  const summary = {
+    contact_matches: contactMatches,
+    distinct_registrations: regIds.length,
+    buildings_found: buildings.length,
+  };
+
+  if (buildings.length === 0) {
+    return {
+      query,
+      found: false,
+      summary,
+      note: boro
+        ? `${contactMatches} contact record(s) matched ${JSON.stringify(name)}, but none of their ` +
+          `${regIds.length} registration(s) are in ${boro.text}. Drop the borough filter to see the ` +
+          "full portfolio."
+        : `${contactMatches} contact record(s) matched ${JSON.stringify(name)}, but none map to a ` +
+          "current HPD registration (the registrations dataset holds current filings only; the " +
+          "buildings may have re-registered under different contacts). Try who_owns on a known " +
+          "address to get the current names.",
+      returned: 0,
+      buildings: [],
+    };
+  }
+
+  const shown = buildings.slice(0, limit);
+  const notes: string[] = [];
+  if (contactMatches > contactRows.length) {
+    notes.push(
+      `Matched ${contactMatches} contact records; scanned the first ${contactRows.length}, so the ` +
+        "portfolio below may be incomplete. Use a more specific name.",
+    );
+  }
+  if (boro && buildings.length < regIds.length) {
+    notes.push(
+      `${regIds.length} registration(s) matched the name city-wide; ${buildings.length} in ${boro.text} after the borough filter.`,
+    );
+  }
+  if (!boro && buildings.length < regIds.length) {
+    notes.push(
+      `${regIds.length - buildings.length} matched registration id(s) have no current registration on file (superseded filings).`,
+    );
+  }
+  if (shown.length < buildings.length) {
+    notes.push(`Showing ${shown.length} of ${buildings.length} buildings; raise limit for more.`);
+  }
+  notes.push(
+    "Contacts reflect HPD registration filings. The same landlord may file each building under a " +
+      "separate LLC; officer and agent person names often connect what the LLC names hide.",
+  );
+
+  return {
+    query,
+    found: true,
+    summary,
+    note: notes.join(" "),
+    returned: shown.length,
+    buildings: shown,
+  };
+}
+
 async function landlordLitigation(args: Row): Promise<unknown> {
   const houseNumberInput = str(args.house_number);
   const street = str(args.street);
@@ -1004,6 +1196,7 @@ const HANDLERS: Record<string, (args: Row) => Promise<unknown>> = {
   building_violations: buildingViolations,
   building_complaints: buildingComplaints,
   who_owns: whoOwns,
+  landlord_portfolio: landlordPortfolio,
   landlord_litigation: landlordLitigation,
   eviction_lookup: evictionLookup,
 };
@@ -1042,4 +1235,4 @@ export function createServer(): Server {
 }
 
 // Exported for tests only (not part of the MCP surface).
-export const __test = { resolveBorough, soql, soqlLike, likeCI, eqTextCI, inText, tally, houseNumberVariants };
+export const __test = { resolveBorough, soql, soqlLike, likeCI, eqTextCI, inText, tally, houseNumberVariants, contactNameWhere };

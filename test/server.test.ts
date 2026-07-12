@@ -110,6 +110,47 @@ const CONTACT_ROWS = [
   },
 ];
 
+// landlord_portfolio: the Sedgwick corporate owner also holding a second,
+// synthetic building (real column shapes, placeholder values) so the reverse
+// lookup's fan-out is exercised.
+const PORTFOLIO_REGISTRATION_ROW_2 = {
+  registrationid: "330001",
+  buildingid: "300001",
+  boroid: "4",
+  boro: "QUEENS",
+  housenumber: "120-15",
+  streetname: "EXAMPLE STREET",
+  zip: "11415",
+  bin: "4000001",
+  communityboard: "9",
+  lastregistrationdate: "2025-08-01T00:00:00.000",
+  registrationenddate: "2026-09-01T00:00:00.000",
+};
+const PORTFOLIO_CONTACT_MATCHES = [
+  {
+    registrationcontactid: "22172903",
+    registrationid: "221729",
+    type: "CorporateOwner",
+    corporationname: "WFHA 1520 SEDGWICK LP",
+    businesshousenumber: "43-55",
+    businessstreetname: "11TH STREET",
+    businesscity: "LIC",
+    businessstate: "NY",
+    businesszip: "11101",
+  },
+  {
+    registrationcontactid: "33000101",
+    registrationid: "330001",
+    type: "CorporateOwner",
+    corporationname: "WFHA 1520 SEDGWICK LP",
+    businesshousenumber: "43-55",
+    businessstreetname: "11TH STREET",
+    businesscity: "LIC",
+    businessstate: "NY",
+    businesszip: "11101",
+  },
+];
+
 const LITIGATION_ROWS = [
   {
     litigationid: "75707",
@@ -246,13 +287,14 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("tool registration", () => {
-  it("lists exactly the five documented tools", async () => {
+  it("lists exactly the six documented tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "building_complaints",
       "building_violations",
       "eviction_lookup",
       "landlord_litigation",
+      "landlord_portfolio",
       "who_owns",
     ]);
     for (const t of tools) expect(t.inputSchema.type).toBe("object");
@@ -498,6 +540,181 @@ describe("who_owns", () => {
     expect(body.found).toBe(false);
     expect(body.contacts).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// landlord_portfolio (reverse who_owns: name -> contacts -> registrations)
+// ---------------------------------------------------------------------------
+
+describe("landlord_portfolio", () => {
+  it("contactNameWhere ORs corporation, first, last, and full-name clauses (unit)", () => {
+    expect(__test.contactNameWhere("O'Brien")).toBe(
+      "(upper(corporationname) like '%O''BRIEN%'" +
+        " OR upper(firstname) like '%O''BRIEN%'" +
+        " OR upper(lastname) like '%O''BRIEN%'" +
+        " OR upper(firstname || ' ' || lastname) like '%O''BRIEN%')",
+    );
+  });
+
+  it("resolves a corporation name to every building it is registered under", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "2" }])); // contact count
+    fetchMock.mockResolvedValueOnce(jsonResponse(PORTFOLIO_CONTACT_MATCHES)); // contact scan
+    fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW, PORTFOLIO_REGISTRATION_ROW_2])); // registrations
+    const body = payload(await call("landlord_portfolio", { name: "WFHA 1520 Sedgwick" }));
+
+    // Count and scan share the same name clause; the scan is capped + ordered.
+    const w = whereOf(0);
+    expect(urlOf(0).pathname).toContain("feu5-w2e2.json");
+    expect(urlOf(0).searchParams.get("$select")).toBe("count(1) as n");
+    expect(w).toContain("upper(corporationname) like '%WFHA 1520 SEDGWICK%'");
+    expect(w).toContain("upper(firstname || ' ' || lastname) like '%WFHA 1520 SEDGWICK%'");
+    expect(whereOf(1)).toBe(w);
+    expect(urlOf(1).searchParams.get("$limit")).toBe("1000");
+    expect(urlOf(1).searchParams.get("$order")).toBe("registrationid");
+    // Registrations resolved by IN() on the deduped numeric ids.
+    expect(urlOf(2).pathname).toContain("tesw-yqqr.json");
+    expect(whereOf(2)).toBe("registrationid in (221729,330001)");
+
+    expect(body.found).toBe(true);
+    expect(body.summary).toEqual({ contact_matches: 2, distinct_registrations: 2, buildings_found: 2 });
+    expect(body.returned).toBe(2);
+    // Sorted for reading: borough, then address (BRONX before QUEENS).
+    expect(body.buildings[0].building_address).toBe("1520 SEDGWICK AVENUE");
+    expect(body.buildings[0].borough).toBe("BRONX");
+    expect(body.buildings[1].building_address).toBe("120-15 EXAMPLE STREET");
+    // Each building lists the contact(s) that matched.
+    expect(body.buildings[0].matched_contacts).toEqual([
+      { type: "CorporateOwner", organization: "WFHA 1520 SEDGWICK LP", person_name: null },
+    ]);
+  });
+
+  it("matches a full person name via the first/last concatenation", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "1" }]));
+    fetchMock.mockResolvedValueOnce(jsonResponse([CONTACT_ROWS[1]])); // Agent JOHN WARREN @ 221729
+    fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
+    const body = payload(await call("landlord_portfolio", { name: "John Warren" }));
+    expect(whereOf(0)).toContain("upper(firstname || ' ' || lastname) like '%JOHN WARREN%'");
+    expect(body.found).toBe(true);
+    expect(body.buildings[0].matched_contacts[0].person_name).toBe("JOHN WARREN");
+    expect(body.buildings[0].matched_contacts[0].type).toBe("Agent");
+  });
+
+  it("dedupes multiple matching contacts on one registration into one building", async () => {
+    const officerRow = {
+      registrationcontactid: "22172999",
+      registrationid: "221729",
+      type: "Officer",
+      corporationname: "WFHA 1520 SEDGWICK LP",
+      firstname: "ANDRE",
+      lastname: "PENNYE",
+    };
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "2" }]));
+    fetchMock.mockResolvedValueOnce(jsonResponse([PORTFOLIO_CONTACT_MATCHES[0], officerRow]));
+    fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
+    const body = payload(await call("landlord_portfolio", { name: "WFHA" }));
+    // One building, its id queried once, with both matching roles listed.
+    expect(whereOf(2)).toBe("registrationid in (221729)");
+    expect(body.summary).toEqual({ contact_matches: 2, distinct_registrations: 1, buildings_found: 1 });
+    expect(body.buildings).toHaveLength(1);
+    expect(body.buildings[0].matched_contacts).toHaveLength(2);
+  });
+
+  it("escapes LIKE wildcards in the name (no silent match-widening)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "0" }]));
+    const body = payload(await call("landlord_portfolio", { name: "100%_MGMT" }));
+    expect(whereOf(0)).toContain("upper(corporationname) like '%100\\%\\_MGMT%'");
+    expect(body.found).toBe(false);
+  });
+
+  it("returns guidance on an empty result instead of a bare zero", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "0" }]));
+    const body = payload(await call("landlord_portfolio", { name: "ZZZ NO SUCH OWNER" }));
+    expect(body.found).toBe(false);
+    expect(body.buildings).toEqual([]);
+    expect(body.note).toMatch(/UPPERCASE/);
+    expect(body.note).toMatch(/who_owns/);
+    // The count probe is the only call; no scan or registration fetch on zero.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies the borough filter to the registration lookup and reports the city-wide count", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "2" }]));
+    fetchMock.mockResolvedValueOnce(jsonResponse(PORTFOLIO_CONTACT_MATCHES));
+    fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW])); // only the Bronx building
+    const body = payload(await call("landlord_portfolio", { name: "WFHA 1520 Sedgwick", borough: "bx" }));
+    const w = whereOf(2);
+    expect(w).toContain("registrationid in (221729,330001)");
+    expect(w).toContain("boro='BRONX'");
+    expect(body.query.borough).toBe("BRONX");
+    expect(body.summary).toEqual({ contact_matches: 2, distinct_registrations: 2, buildings_found: 1 });
+    expect(body.note).toMatch(/city-wide; 1 in BRONX/);
+  });
+
+  it("notes when the borough filter empties the portfolio", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "2" }]));
+    fetchMock.mockResolvedValueOnce(jsonResponse(PORTFOLIO_CONTACT_MATCHES));
+    fetchMock.mockResolvedValueOnce(jsonResponse([])); // nothing in Staten Island
+    const body = payload(await call("landlord_portfolio", { name: "WFHA 1520 Sedgwick", borough: "SI" }));
+    expect(body.found).toBe(false);
+    expect(body.summary.distinct_registrations).toBe(2);
+    expect(body.note).toMatch(/STATEN ISLAND/);
+    expect(body.note).toMatch(/[Dd]rop the borough filter/);
+  });
+
+  it("reports Showing N of M when the page is capped", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "2" }]));
+    fetchMock.mockResolvedValueOnce(jsonResponse(PORTFOLIO_CONTACT_MATCHES));
+    fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW, PORTFOLIO_REGISTRATION_ROW_2]));
+    const body = payload(await call("landlord_portfolio", { name: "WFHA 1520 Sedgwick", limit: 1 }));
+    expect(body.summary.buildings_found).toBe(2);
+    expect(body.returned).toBe(1);
+    expect(body.buildings).toHaveLength(1);
+    expect(body.note).toMatch(/Showing 1 of 2/);
+  });
+
+  it("notes when the contact scan was capped (more matches than scanned)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "1500" }]));
+    fetchMock.mockResolvedValueOnce(jsonResponse(PORTFOLIO_CONTACT_MATCHES)); // page smaller than total
+    fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW, PORTFOLIO_REGISTRATION_ROW_2]));
+    const body = payload(await call("landlord_portfolio", { name: "MANAGEMENT" }));
+    expect(body.summary.contact_matches).toBe(1500);
+    expect(body.note).toMatch(/1500 contact/);
+    expect(body.note).toMatch(/scanned/i);
+    expect(body.note).toMatch(/incomplete|more specific/i);
+  });
+
+  it("chunks large registration-id sets into multiple IN() queries", async () => {
+    const manyContacts = Array.from({ length: 150 }, (_, i) => ({
+      registrationcontactid: String(90000000 + i),
+      registrationid: String(400000 + i),
+      type: "CorporateOwner",
+      corporationname: "MEGA HOLDINGS LLC",
+    }));
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "150" }]));
+    fetchMock.mockResolvedValueOnce(jsonResponse(manyContacts));
+    fetchMock.mockResolvedValueOnce(jsonResponse([])); // chunk 1: ids 400000..400099, none current
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse([{ ...PORTFOLIO_REGISTRATION_ROW_2, registrationid: "400100" }]), // chunk 2 hit
+    );
+    const body = payload(await call("landlord_portfolio", { name: "Mega Holdings" }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const ids1 = whereOf(2).match(/registrationid in \(([^)]+)\)/)?.[1]?.split(",") ?? [];
+    const ids2 = whereOf(3).match(/registrationid in \(([^)]+)\)/)?.[1]?.split(",") ?? [];
+    expect(ids1).toHaveLength(100);
+    expect(ids2).toHaveLength(50);
+    expect(ids1[0]).toBe("400000");
+    expect(ids2[0]).toBe("400100");
+    expect(body.summary).toEqual({ contact_matches: 150, distinct_registrations: 150, buildings_found: 1 });
+    expect(body.buildings[0].registration_id).toBe("400100");
+  });
+
+  it("requires a name (error, no network)", async () => {
+    const res: any = await call("landlord_portfolio", {});
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/name is required/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

@@ -63,6 +63,19 @@ async function main(): Promise<void> {
   );
 
   await check(
+    "landlord_portfolio",
+    { name: "WFHA 1520 SEDGWICK", borough: "Bronx", limit: 5 },
+    (b) =>
+      b.found === true &&
+      b.summary &&
+      typeof b.summary.contact_matches === "number" &&
+      Array.isArray(b.buildings) &&
+      b.buildings.length > 0,
+    (b) =>
+      `${b.summary.contact_matches} contact match(es) -> ${b.summary.buildings_found} building(s); first: ${b.buildings[0]?.building_address ?? "(none)"} (${b.buildings[0]?.borough ?? "?"})`,
+  );
+
+  await check(
     "landlord_litigation",
     { borough: "Bronx", respondent: "realty", limit: 3 },
     (b) => Array.isArray(b.results) && b.summary && typeof b.summary.total_matching === "number" && typeof b.returned === "number",
