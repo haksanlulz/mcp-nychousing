@@ -69,6 +69,8 @@ const APP_TOKEN_DOCS = "https://dev.socrata.com/docs/app-tokens.html";
 const UA = "mcp-nychousing/1.0 (+https://github.com/haksanlulz/mcp-nychousing)";
 /** Minimum spacing between outbound API calls (polite throttle). */
 const THROTTLE_MS = 200;
+/** Abort a single outbound request after this long. */
+const REQUEST_TIMEOUT_MS = 15_000;
 /** Hard upper bound on rows returned by any single detail tool call. */
 const MAX_RESULTS = 500;
 
@@ -95,22 +97,18 @@ function buildHeaders(): Record<string, string> {
 
 let queue: Promise<unknown> = Promise.resolve();
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Run `fn` after all prior throttled calls, spacing each by THROTTLE_MS. */
+/**
+ * Run `fn` after all prior throttled calls, then hold the queue open for
+ * THROTTLE_MS so the NEXT call starts spaced out. The caller receives fn's
+ * result as soon as it settles (the gap is charged to the following call, not
+ * this one). Rejections are swallowed on the internal chain so one failed call
+ * cannot poison the queue; the caller still sees the original error via `run`.
+ */
 function throttled<T>(fn: () => Promise<T>): Promise<T> {
-  const run = queue.then(async () => {
-    const result = await fn();
-    await sleep(THROTTLE_MS);
-    return result;
-  });
-  // Keep the queue alive regardless of success/failure; swallow to avoid
-  // unhandled-rejection noise on the internal chain (callers still see errors).
+  const run = queue.then(fn, fn);
   queue = run.then(
-    () => undefined,
-    () => undefined,
+    () => new Promise((r) => setTimeout(r, THROTTLE_MS)),
+    () => new Promise((r) => setTimeout(r, THROTTLE_MS)),
   );
   return run;
 }
@@ -133,36 +131,43 @@ async function sodaGet(dataset: string, params: Record<string, QueryValue> = {})
     if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
   }
 
-  const res = await throttled(() => fetch(url, { headers: buildHeaders() }));
-  const text = await res.text();
+  // The whole fetch + parse runs inside the throttle so spacing and the request
+  // timeout apply to every call.
+  return throttled(async () => {
+    const res = await fetch(url, {
+      headers: buildHeaders(),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    const text = await res.text();
 
-  if (!res.ok) {
-    // SODA errors are JSON like {"error":true,"message":"..."}; surface the message.
-    let detail = text.slice(0, 300).trim();
-    try {
-      const j = JSON.parse(text) as Row;
-      if (j && typeof j === "object" && typeof j.message === "string") detail = j.message;
-    } catch {
-      /* leave detail as the raw text slice */
+    if (!res.ok) {
+      // SODA errors are JSON like {"error":true,"message":"..."}; surface the message.
+      let detail = text.slice(0, 300).trim();
+      try {
+        const j = JSON.parse(text) as Row;
+        if (j && typeof j === "object" && typeof j.message === "string") detail = j.message;
+      } catch {
+        /* leave detail as the raw text slice */
+      }
+      throw new Error(`NYC Open Data request failed (HTTP ${res.status}): ${detail}`);
     }
-    throw new Error(`NYC Open Data request failed (HTTP ${res.status}): ${detail}`);
-  }
 
-  let json: unknown;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    // HTML error pages / proxy interstitials arrive as non-JSON with a 200.
-    throw new Error(`NYC Open Data returned a non-JSON response: ${text.slice(0, 300).trim()}`);
-  }
+    let json: unknown;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // HTML error pages / proxy interstitials arrive as non-JSON with a 200.
+      throw new Error(`NYC Open Data returned a non-JSON response: ${text.slice(0, 300).trim()}`);
+    }
 
-  if (Array.isArray(json)) return json as Row[];
-  // A 200 with an error object is rare but possible for malformed SoQL.
-  if (json && typeof json === "object" && (json as Row).error) {
-    const msg = (json as Row).message;
-    throw new Error(`NYC Open Data query error: ${typeof msg === "string" ? msg : JSON.stringify(json)}`);
-  }
-  throw new Error("NYC Open Data returned an unexpected (non-array) response.");
+    if (Array.isArray(json)) return json as Row[];
+    // A 200 with an error object is rare but possible for malformed SoQL.
+    if (json && typeof json === "object" && (json as Row).error) {
+      const msg = (json as Row).message;
+      throw new Error(`NYC Open Data query error: ${typeof msg === "string" ? msg : JSON.stringify(json)}`);
+    }
+    throw new Error("NYC Open Data returned an unexpected (non-array) response.");
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +207,22 @@ function soql(s: string): string {
   return s.replace(/'/g, "''");
 }
 
+/**
+ * Escape a string for use INSIDE a SoQL LIKE pattern. Beyond `soql`'s quote
+ * escaping, the LIKE wildcards `%` (any run) and `_` (any single char) and the
+ * escape character `\` itself must be neutralized, or user input like "100%"
+ * would silently widen the match to everything. SoQL treats backslash as the
+ * LIKE escape char (`2\_7` matches a literal "2_7", not "217").
+ * Order matters: double backslashes first, then the wildcards, then the quote.
+ */
+function soqlLike(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_")
+    .replace(/'/g, "''");
+}
+
 /** `col = 'value'` (case-insensitive exact via upper() on both sides). */
 function eqTextCI(col: string, value: string): string {
   return `upper(${col})='${soql(value.toUpperCase())}'`;
@@ -217,9 +238,10 @@ function eqNum(col: string, n: number): string {
   return `${col}=${n}`;
 }
 
-/** `upper(col) like '%value%'`, a case-insensitive substring match. */
+/** `upper(col) like '%value%'`, a case-insensitive substring match. The outer
+ * `%` are our intentional wildcards; the user value is wildcard-escaped. */
 function likeCI(col: string, value: string): string {
-  return `upper(${col}) like '%${soql(value.toUpperCase())}%'`;
+  return `upper(${col}) like '%${soqlLike(value.toUpperCase())}%'`;
 }
 
 /** `col >= 'isoDate'` for a floating-timestamp column. isoDate must be trusted. */
@@ -266,8 +288,12 @@ const BOROUGHS: Record<string, Borough> = {
 
 /** Every accepted spelling / abbreviation / code -> canonical borough key. */
 const BOROUGH_ALIASES: Record<string, string> = {
+  // "NEW YORK" (the county name) and code "1" are real Manhattan references and
+  // stay. "NY"/"NYC" name the whole city, not a borough, and are handled as
+  // ambiguous below rather than silently mapped to Manhattan (a "NYC" query
+  // used to return Manhattan-only data under a city-wide label).
   MANHATTAN: "MANHATTAN", MN: "MANHATTAN", MAN: "MANHATTAN", "NEW YORK": "MANHATTAN",
-  NEWYORK: "MANHATTAN", NY: "MANHATTAN", NYC: "MANHATTAN", "1": "MANHATTAN",
+  NEWYORK: "MANHATTAN", "1": "MANHATTAN",
   BRONX: "BRONX", "THE BRONX": "BRONX", BX: "BRONX", "2": "BRONX",
   BROOKLYN: "BROOKLYN", BK: "BROOKLYN", BKLYN: "BROOKLYN", KINGS: "BROOKLYN", "3": "BROOKLYN",
   QUEENS: "QUEENS", QN: "QUEENS", QNS: "QUEENS", "4": "QUEENS",
@@ -275,11 +301,27 @@ const BOROUGH_ALIASES: Record<string, string> = {
   RICHMOND: "STATEN ISLAND", "5": "STATEN ISLAND",
 };
 
+/**
+ * City-wide inputs that name the whole city, not one borough. HPD datasets are
+ * per-borough, so silently resolving these to Manhattan (as an earlier version
+ * did for NY/NYC) returns one borough's data under a five-borough label: a
+ * silent wrong answer. We reject them with an error instead of querying all
+ * five boroughs, because each dataset uses a different borough column and a
+ * single Borough value flows through every query.
+ */
+const CITYWIDE_AMBIGUOUS = new Set(["NY", "NYC", "NEW YORK CITY"]);
+
 /** Resolve free-form borough input to a Borough, or throw a clear error. */
 function resolveBorough(input: unknown): Borough {
   const s = str(input);
   if (!s) throw new Error("borough is required (Manhattan, Bronx, Brooklyn, Queens, or Staten Island).");
   const key = s.toUpperCase().replace(/\s+/g, " ").trim();
+  if (CITYWIDE_AMBIGUOUS.has(key)) {
+    throw new Error(
+      `Borough ${JSON.stringify(s)} is ambiguous: it names the whole city, not one borough. ` +
+        "Specify MANHATTAN, BRONX, BROOKLYN, QUEENS, or STATEN ISLAND (one borough per query).",
+    );
+  }
   const canon = BOROUGH_ALIASES[key];
   if (!canon) {
     throw new Error(
@@ -319,6 +361,54 @@ function normSince(v: unknown, label: string): string | undefined {
     throw new Error(`${label} must be an ISO date (YYYY-MM-DD); got ${JSON.stringify(v)}.`);
   }
   return `${s}T00:00:00`;
+}
+
+/**
+ * Candidate house-number spellings to try when an exact match finds nothing.
+ * NYC outer-borough addresses (Queens especially) are stored hyphenated, e.g.
+ * "120-15"; a user who types "12015" or "120 15" would otherwise get a silent
+ * zero, which for a tenant reads as a falsely clean building. Returns the input
+ * first (so a direct hit needs no retry), then separator-normalized forms. The
+ * digit-insertion form ("12015" -> "120-15") is only offered when
+ * `hyphenateDigits` is set (callers pass this for Queens), so plain numbers in
+ * other boroughs are never rewritten into unrelated addresses.
+ */
+function houseNumberVariants(input: string, opts: { hyphenateDigits?: boolean } = {}): string[] {
+  const base = input.toUpperCase().trim();
+  const out: string[] = [];
+  const push = (v: string) => {
+    const t = v.trim();
+    if (t && !out.includes(t)) out.push(t);
+  };
+  push(base);
+  if (/[\s-]/.test(base)) {
+    push(base.replace(/\s+/g, "-")); // "120 15" -> "120-15"
+    push(base.replace(/[\s-]+/g, "")); // "120-15" -> "12015"
+  }
+  if (opts.hyphenateDigits && /^\d{3,}$/.test(base)) {
+    push(`${base.slice(0, -2)}-${base.slice(-2)}`); // "12015" -> "120-15"
+  }
+  return out;
+}
+
+/**
+ * Run `probe` for each house-number spelling variant until one reports a match,
+ * defeating the hyphenation silent-zero. Returns the matching variant's result
+ * (and which spelling won); if none match, returns the first (literal) attempt's
+ * result unchanged so the caller still reports the empty result for the
+ * spelling the user gave.
+ */
+async function tryHouseNumberVariants<T>(
+  variants: string[],
+  probe: (houseNumber: string) => Promise<{ matched: boolean; value: T }>,
+): Promise<{ houseNumber: string; matchedVariant: boolean; value: T }> {
+  let first: { houseNumber: string; value: T } | undefined;
+  for (const houseNumber of variants) {
+    const r = await probe(houseNumber);
+    if (!first) first = { houseNumber, value: r.value };
+    if (r.matched) return { houseNumber, matchedVariant: houseNumber !== variants[0], value: r.value };
+  }
+  return { houseNumber: first!.houseNumber, matchedVariant: false, value: first!.value };
 }
 
 /** Turn an aggregate `[{key, n}]` result into a { key: count } object + total. */
@@ -575,7 +665,7 @@ const TOOLS: Tool[] = [
 // ---------------------------------------------------------------------------
 
 async function buildingViolations(args: Row): Promise<unknown> {
-  const houseNumber = reqStr(args.house_number, "house_number");
+  const houseNumberInput = reqStr(args.house_number, "house_number");
   const street = reqStr(args.street, "street");
   const boro = resolveBorough(args.borough);
   const openOnly = args.open_only === true;
@@ -583,35 +673,45 @@ async function buildingViolations(args: Row): Promise<unknown> {
   const violationClass = str(args.violation_class);
   const limit = clampLimit(args.limit, 100);
 
-  const conditions = [
-    eqTextCI("housenumber", houseNumber),
-    eqText("boro", boro.text),
-    likeCI("streetname", street),
-  ];
-  if (openOnly) conditions.push(eqTextCI("violationstatus", "OPEN"));
-  if (violationClass) conditions.push(eqTextCI("class", violationClass));
-  if (since) conditions.push(gteDate("inspectiondate", since));
-  const where = whereAnd(conditions);
+  const buildWhere = (houseNumber: string): string | undefined => {
+    const conditions = [
+      eqTextCI("housenumber", houseNumber),
+      eqText("boro", boro.text),
+      likeCI("streetname", street),
+    ];
+    if (openOnly) conditions.push(eqTextCI("violationstatus", "OPEN"));
+    if (violationClass) conditions.push(eqTextCI("class", violationClass));
+    if (since) conditions.push(gteDate("inspectiondate", since));
+    return whereAnd(conditions);
+  };
 
-  // Summary: server-side class tally over ALL matches (not just the returned page).
-  const summaryRows = await sodaGet(DATASET.violations, {
-    $select: "class,count(1) as n",
-    $where: where,
-    $group: "class",
-    $order: "class",
+  // Summary: server-side class tally over ALL matches (not just the returned
+  // page). This count query also probes house-number spelling variants so a
+  // de-hyphenated Queens number does not read as a clean building (silent zero).
+  const variants = houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" });
+  const resolved = await tryHouseNumberVariants(variants, async (houseNumber) => {
+    const where = buildWhere(houseNumber);
+    const summaryRows = await sodaGet(DATASET.violations, {
+      $select: "class,count(1) as n",
+      $where: where,
+      $group: "class",
+      $order: "class",
+    });
+    const { total, by } = tally(summaryRows, "class");
+    return { matched: total > 0, value: { where, total, by } };
   });
-  const { total, by } = tally(summaryRows, "class");
+  const { where, total, by } = resolved.value;
 
-  const rows = await sodaGet(DATASET.violations, {
-    $where: where,
-    $order: "inspectiondate DESC",
-    $limit: limit,
-  });
+  const rows =
+    total > 0
+      ? await sodaGet(DATASET.violations, { $where: where, $order: "inspectiondate DESC", $limit: limit })
+      : [];
   const results = rows.map(normViolation);
 
   return {
     query: {
-      house_number: houseNumber,
+      house_number: resolved.matchedVariant ? resolved.houseNumber : houseNumberInput,
+      house_number_searched: resolved.matchedVariant ? houseNumberInput : undefined,
       street,
       borough: boro.text,
       open_only: openOnly,
@@ -619,76 +719,100 @@ async function buildingViolations(args: Row): Promise<unknown> {
       since: str(args.since) ?? null,
     },
     summary: { total_matching: total, by_class: by },
+    note: resolved.matchedVariant
+      ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
+      : undefined,
     returned: results.length,
     results,
   };
 }
 
 async function buildingComplaints(args: Row): Promise<unknown> {
-  const houseNumber = reqStr(args.house_number, "house_number");
+  const houseNumberInput = reqStr(args.house_number, "house_number");
   const street = reqStr(args.street, "street");
   const boro = resolveBorough(args.borough);
   const openOnly = args.open_only === true;
   const since = normSince(args.since, "since");
   const limit = clampLimit(args.limit, 100);
 
-  const conditions = [
-    eqTextCI("house_number", houseNumber),
-    eqText("borough", boro.text),
-    likeCI("street_name", street),
-  ];
-  if (openOnly) conditions.push(eqTextCI("complaint_status", "OPEN"));
-  if (since) conditions.push(gteDate("received_date", since));
-  const where = whereAnd(conditions);
+  const buildWhere = (houseNumber: string): string | undefined => {
+    const conditions = [
+      eqTextCI("house_number", houseNumber),
+      eqText("borough", boro.text),
+      likeCI("street_name", street),
+    ];
+    if (openOnly) conditions.push(eqTextCI("complaint_status", "OPEN"));
+    if (since) conditions.push(gteDate("received_date", since));
+    return whereAnd(conditions);
+  };
 
-  // Summary: server-side open/closed tally over ALL matches.
-  const summaryRows = await sodaGet(DATASET.complaints, {
-    $select: "complaint_status,count(1) as n",
-    $where: where,
-    $group: "complaint_status",
-    $order: "complaint_status",
+  // Summary: server-side open/closed tally over ALL matches, doubling as the
+  // house-number variant probe (Queens hyphenation silent-zero guard).
+  const variants = houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" });
+  const resolved = await tryHouseNumberVariants(variants, async (houseNumber) => {
+    const where = buildWhere(houseNumber);
+    const summaryRows = await sodaGet(DATASET.complaints, {
+      $select: "complaint_status,count(1) as n",
+      $where: where,
+      $group: "complaint_status",
+      $order: "complaint_status",
+    });
+    const { total, by } = tally(summaryRows, "complaint_status");
+    return { matched: total > 0, value: { where, total, by } };
   });
-  const { total, by } = tally(summaryRows, "complaint_status");
+  const { where, total, by } = resolved.value;
 
-  const rows = await sodaGet(DATASET.complaints, {
-    $where: where,
-    $order: "received_date DESC",
-    $limit: limit,
-  });
+  const rows =
+    total > 0
+      ? await sodaGet(DATASET.complaints, { $where: where, $order: "received_date DESC", $limit: limit })
+      : [];
   const results = rows.map(normComplaint);
 
   return {
     query: {
-      house_number: houseNumber,
+      house_number: resolved.matchedVariant ? resolved.houseNumber : houseNumberInput,
+      house_number_searched: resolved.matchedVariant ? houseNumberInput : undefined,
       street,
       borough: boro.text,
       open_only: openOnly,
       since: str(args.since) ?? null,
     },
     summary: { total_matching: total, by_status: by },
+    note: resolved.matchedVariant
+      ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
+      : undefined,
     returned: results.length,
     results,
   };
 }
 
 async function whoOwns(args: Row): Promise<unknown> {
-  const houseNumber = reqStr(args.house_number, "house_number");
+  const houseNumberInput = reqStr(args.house_number, "house_number");
   const street = reqStr(args.street, "street");
   const boro = resolveBorough(args.borough);
 
-  const where = whereAnd([
-    eqTextCI("housenumber", houseNumber),
-    eqText("boro", boro.text),
-    likeCI("streetname", street),
-  ]);
-  const regRows = await sodaGet(DATASET.registrations, {
-    $where: where,
-    $order: "lastregistrationdate DESC",
-    $limit: 25,
-  });
-  const registrations = regRows.map(normRegistration);
+  const buildWhere = (houseNumber: string): string | undefined =>
+    whereAnd([eqTextCI("housenumber", houseNumber), eqText("boro", boro.text), likeCI("streetname", street)]);
 
-  const query = { house_number: houseNumber, street, borough: boro.text };
+  // Probe house-number spelling variants so a de-hyphenated Queens number is not
+  // reported as an unregistered building (silent zero).
+  const variants = houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" });
+  const resolved = await tryHouseNumberVariants(variants, async (houseNumber) => {
+    const regRows = await sodaGet(DATASET.registrations, {
+      $where: buildWhere(houseNumber),
+      $order: "lastregistrationdate DESC",
+      $limit: 25,
+    });
+    return { matched: regRows.length > 0, value: regRows };
+  });
+  const registrations = resolved.value.map(normRegistration);
+
+  const query = {
+    house_number: resolved.matchedVariant ? resolved.houseNumber : houseNumberInput,
+    house_number_searched: resolved.matchedVariant ? houseNumberInput : undefined,
+    street,
+    borough: boro.text,
+  };
   if (registrations.length === 0) {
     return {
       query,
@@ -721,10 +845,14 @@ async function whoOwns(args: Row): Promise<unknown> {
     (byType[t] ??= []).push(c);
   }
 
+  const filingsNote =
+    "Contacts are HPD registration filings (owner/agent/officer of record); confirm before relying on them for service of process.";
   return {
     query,
     found: true,
-    note: "Contacts are HPD registration filings (owner/agent/officer of record); confirm before relying on them for service of process.",
+    note: resolved.matchedVariant
+      ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}" (NYC outer-borough addresses are stored hyphenated). ${filingsNote}`
+      : filingsNote,
     registrations,
     contacts_by_type: byType,
     contacts,
@@ -732,61 +860,99 @@ async function whoOwns(args: Row): Promise<unknown> {
 }
 
 async function landlordLitigation(args: Row): Promise<unknown> {
-  const houseNumber = str(args.house_number);
+  const houseNumberInput = str(args.house_number);
   const street = str(args.street);
   const respondent = str(args.respondent);
   const caseStatus = str(args.case_status);
   const limit = clampLimit(args.limit, 100);
 
-  const conditions: string[] = [];
-  let boroText: string | null = null;
-
-  // Building lookup: needs all three address parts (borough -> numeric boroid).
-  if (houseNumber || street) {
-    if (!houseNumber || !street || !str(args.borough)) {
+  const isBuilding = Boolean(houseNumberInput || street);
+  let boro: Borough | null = null;
+  if (isBuilding) {
+    // Building lookup: needs all three address parts (borough -> numeric boroid).
+    if (!houseNumberInput || !street || !str(args.borough)) {
       throw new Error("A building lookup needs house_number, street, and borough together. Or search by respondent instead.");
     }
-    const boro = resolveBorough(args.borough);
-    boroText = boro.text;
-    conditions.push(eqTextCI("housenumber", houseNumber), eqNum("boroid", boro.id), likeCI("streetname", street));
+    boro = resolveBorough(args.borough);
   } else if (str(args.borough)) {
     // Borough given without a building: scope a respondent search to that boroid.
-    const boro = resolveBorough(args.borough);
-    boroText = boro.text;
-    conditions.push(eqNum("boroid", boro.id));
+    boro = resolveBorough(args.borough);
   }
-
-  if (respondent) conditions.push(likeCI("respondent", respondent));
-  if (caseStatus) conditions.push(eqTextCI("casestatus", caseStatus));
-
-  if (!respondent && !(houseNumber && street)) {
+  if (!respondent && !(houseNumberInput && street)) {
     throw new Error("Provide a building (house_number + street + borough) or a respondent name.");
   }
 
-  const rows = await sodaGet(DATASET.litigations, {
-    $where: whereAnd(conditions),
-    $order: "caseopendate DESC",
-    $limit: limit,
-  });
+  const buildWhere = (houseNumber: string | null): string | undefined => {
+    const conditions: string[] = [];
+    if (houseNumber) conditions.push(eqTextCI("housenumber", houseNumber));
+    if (boro) conditions.push(eqNum("boroid", boro.id));
+    if (street) conditions.push(likeCI("streetname", street));
+    if (respondent) conditions.push(likeCI("respondent", respondent));
+    if (caseStatus) conditions.push(eqTextCI("casestatus", caseStatus));
+    return whereAnd(conditions);
+  };
+
+  // Server-side by-status summary over ALL matches (not a tally of the returned
+  // page, which is capped at `limit`), mirroring building_violations. For a
+  // building lookup this count query also probes house-number spelling variants.
+  const summaryOf = async (houseNumber: string | null) => {
+    const where = buildWhere(houseNumber);
+    const summaryRows = await sodaGet(DATASET.litigations, {
+      $select: "casestatus,count(1) as n",
+      $where: where,
+      $group: "casestatus",
+      $order: "casestatus",
+    });
+    const { total, by } = tally(summaryRows, "casestatus");
+    return { where, total, by };
+  };
+
+  let where: string | undefined;
+  let total: number;
+  let by: Record<string, number>;
+  let displayHouseNumber = houseNumberInput;
+  let matchedVariant = false;
+
+  if (isBuilding && houseNumberInput) {
+    const variants = houseNumberVariants(houseNumberInput, { hyphenateDigits: boro?.text === "QUEENS" });
+    const resolved = await tryHouseNumberVariants(variants, async (houseNumber) => {
+      const s = await summaryOf(houseNumber);
+      return { matched: s.total > 0, value: s };
+    });
+    ({ where, total, by } = resolved.value);
+    matchedVariant = resolved.matchedVariant;
+    displayHouseNumber = matchedVariant ? resolved.houseNumber : houseNumberInput;
+  } else {
+    ({ where, total, by } = await summaryOf(null));
+  }
+
+  const rows =
+    total > 0
+      ? await sodaGet(DATASET.litigations, { $where: where, $order: "caseopendate DESC", $limit: limit })
+      : [];
   const results = rows.map(normLitigation);
 
-  // Small per-status tally over the returned rows.
-  const byStatus: Record<string, number> = {};
-  for (const r of results) {
-    const s = (str((r as Row).case_status) ?? "(unspecified)") as string;
-    byStatus[s] = (byStatus[s] ?? 0) + 1;
+  const notes: string[] = [];
+  if (matchedVariant) {
+    notes.push(
+      `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${displayHouseNumber}" (NYC outer-borough addresses are stored hyphenated, e.g. 120-15).`,
+    );
+  }
+  if (results.length === limit && total > results.length) {
+    notes.push(`Showing ${results.length} of ${total} matching cases; narrow the query or raise limit for more.`);
   }
 
   return {
     query: {
-      house_number: houseNumber ?? null,
+      house_number: displayHouseNumber ?? null,
+      house_number_searched: matchedVariant ? houseNumberInput : undefined,
       street: street ?? null,
-      borough: boroText,
+      borough: boro?.text ?? null,
       respondent: respondent ?? null,
       case_status: caseStatus ?? null,
     },
-    summary: { returned: results.length, by_status: byStatus },
-    note: results.length === limit ? `Capped at limit ${limit}; narrow the query for more.` : undefined,
+    summary: { total_matching: total, by_status: by },
+    note: notes.length ? notes.join(" ") : undefined,
     returned: results.length,
     results,
   };
@@ -876,4 +1042,4 @@ export function createServer(): Server {
 }
 
 // Exported for tests only (not part of the MCP surface).
-export const __test = { resolveBorough, soql, likeCI, eqTextCI, inText, tally };
+export const __test = { resolveBorough, soql, soqlLike, likeCI, eqTextCI, inText, tally, houseNumberVariants };

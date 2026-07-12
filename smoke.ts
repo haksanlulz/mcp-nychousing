@@ -65,8 +65,8 @@ async function main(): Promise<void> {
   await check(
     "landlord_litigation",
     { borough: "Bronx", respondent: "realty", limit: 3 },
-    (b) => Array.isArray(b.results) && b.summary && typeof b.summary.returned === "number",
-    (b) => `${b.returned} case(s); first respondent: ${b.results[0]?.respondent ?? "(none)"}`,
+    (b) => Array.isArray(b.results) && b.summary && typeof b.summary.total_matching === "number" && typeof b.returned === "number",
+    (b) => `${b.summary.total_matching} case(s) via $group; showing ${b.returned}; first respondent: ${b.results[0]?.respondent ?? "(none)"}`,
   );
 
   await check(

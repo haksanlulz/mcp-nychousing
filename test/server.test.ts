@@ -145,6 +145,31 @@ const LITIGATION_ROWS = [
   },
 ];
 
+// Queens stores hyphenated house numbers (e.g. "120-15"); a user who types
+// "12015" or "120 15" must still match instead of getting a silent zero.
+// Placeholder street, not a real address.
+const QUEENS_VIOLATION_ROW = {
+  violationid: "20000001",
+  buildingid: "300001",
+  registrationid: "330001",
+  boroid: "4",
+  boro: "QUEENS",
+  housenumber: "120-15",
+  streetname: "EXAMPLE STREET",
+  zip: "11415",
+  apartment: "3B",
+  class: "B",
+  inspectiondate: "2026-05-10T00:00:00.000",
+  novdescription: "HMC ADM CODE: SAMPLE HAZARDOUS VIOLATION",
+  currentstatus: "VIOLATION OPEN",
+  violationstatus: "Open",
+  rentimpairing: "N",
+};
+const QUEENS_VIOLATION_SUMMARY = [
+  { class: "A", n: "4" },
+  { class: "B", n: "9" },
+];
+
 // Synthetic row: real column shape, placeholder values (not a real eviction).
 const EVICTION_ROW = {
   court_index_number: "123456/24",
@@ -248,8 +273,32 @@ describe("borough resolution + SoQL escaping (unit)", () => {
   it("throws on an unknown borough", () => {
     expect(() => __test.resolveBorough("Camden")).toThrow(/Unrecognized borough/);
   });
+
+  // "NYC"/"NY" name the whole city, not Manhattan. They must NOT silently
+  // resolve to Manhattan (which would return one borough's data city-wide).
+  it("rejects city-wide NY/NYC as ambiguous instead of silently mapping to Manhattan", () => {
+    for (const input of ["NYC", "NY", "nyc", "New York City"]) {
+      expect(() => __test.resolveBorough(input)).toThrow(/ambiguous|whole city/i);
+    }
+    // Real single-borough references still resolve (New York County = Manhattan).
+    expect(__test.resolveBorough("New York")).toMatchObject({ id: 1, text: "MANHATTAN" });
+    expect(__test.resolveBorough("NEWYORK")).toMatchObject({ id: 1, text: "MANHATTAN" });
+    expect(__test.resolveBorough("1")).toMatchObject({ id: 1, text: "MANHATTAN" });
+    expect(__test.resolveBorough("Manhattan")).toMatchObject({ id: 1, text: "MANHATTAN" });
+  });
+
   it("escapes single quotes in a LIKE value (SoQL injection guard)", () => {
     expect(__test.likeCI("respondent", "O'Brien")).toBe("upper(respondent) like '%O''BRIEN%'");
+  });
+
+  // % and _ are LIKE wildcards; unescaped user input would widen the match
+  // (e.g. "100%" matching everything). SoQL uses backslash as the LIKE escape char.
+  it("escapes LIKE wildcards (%, _) and backslash in the user portion", () => {
+    expect(__test.likeCI("respondent", "100%_off")).toBe("upper(respondent) like '%100\\%\\_OFF%'");
+    // A literal backslash the user typed is doubled so it stays literal.
+    expect(__test.likeCI("streetname", "a\\b")).toBe("upper(streetname) like '%A\\\\B%'");
+    // The outer %...% (our substring wildcards) are preserved; only the user text is escaped.
+    expect(__test.likeCI("streetname", "217 STREET")).toBe("upper(streetname) like '%217 STREET%'");
   });
 });
 
@@ -320,6 +369,72 @@ describe("building_violations", () => {
     expect(res.content[0].text).toMatch(/YYYY-MM-DD/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  // A tool call with the city-wide "NYC"/"NY" must error, not silently query
+  // Manhattan and report it as if it were the whole city.
+  it("does not silently treat NYC/NY as Manhattan; errors before any network call", async () => {
+    for (const borough of ["NYC", "NY"]) {
+      const res: any = await call("building_violations", { house_number: "1520", street: "Sedgwick Avenue", borough });
+      expect(res.isError).toBe(true);
+      expect(res.content[0].text).toMatch(/ambiguous|whole city/i);
+      expect(res.content[0].text).not.toMatch(/MANHATTAN'/); // no silent Manhattan substitution
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Queens hyphenated house numbers: HPD stores them hyphenated (e.g. "120-15");
+// a user typing "12015" / "120 15" must be retried against the stored form
+// instead of reading as a clean building.
+// ---------------------------------------------------------------------------
+
+describe("house-number hyphenation (Queens silent-zero)", () => {
+  it("houseNumberVariants: hyphenates plain Queens digits before the last two", () => {
+    // Queens (hyphenateDigits): plain "12015" -> also try "120-15".
+    expect(__test.houseNumberVariants("12015", { hyphenateDigits: true })).toEqual(["12015", "120-15"]);
+    // Spaced/hyphenated input normalizes across separators regardless of borough.
+    expect(__test.houseNumberVariants("120 15")).toEqual(["120 15", "120-15", "12015"]);
+    expect(__test.houseNumberVariants("120-15")).toEqual(["120-15", "12015"]);
+    // Non-Queens plain digits are left alone (no spurious "15-20" for "1520").
+    expect(__test.houseNumberVariants("1520")).toEqual(["1520"]);
+    expect(__test.houseNumberVariants("1520", { hyphenateDigits: true })).toEqual(["1520", "15-20"]);
+  });
+
+  it("building_violations retries a de-hyphenated Queens number and finds the building", async () => {
+    // Literal "12015" summary returns empty (silent zero) ...
+    fetchMock.mockResolvedValueOnce(jsonResponse([]));
+    // ... retry with the stored "120-15" hits the summary ...
+    fetchMock.mockResolvedValueOnce(jsonResponse(QUEENS_VIOLATION_SUMMARY));
+    // ... then the detail page is fetched with the matched spelling.
+    fetchMock.mockResolvedValueOnce(jsonResponse([QUEENS_VIOLATION_ROW]));
+
+    const body = payload(await call("building_violations", { house_number: "12015", street: "Example Street", borough: "Queens" }));
+
+    // Not a silent zero: it found the real building's 13 violations.
+    expect(body.summary.total_matching).toBe(13);
+    expect(body.summary.by_class).toEqual({ A: 4, B: 9 });
+    expect(body.returned).toBe(1);
+    // The detail query used the stored hyphenated house number.
+    expect(whereOf(2)).toContain("upper(housenumber)='120-15'");
+    // The response surfaces the correction to the caller.
+    expect(body.query.house_number).toBe("120-15");
+    expect(body.query.house_number_searched).toBe("12015");
+    expect(body.note).toMatch(/120-15|hyphenat/i);
+  });
+
+  it("building_violations reports zero when no variant matches", async () => {
+    // Both the literal and the hyphenated variant return empty.
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_violations", { house_number: "99999", street: "Nowhere Street", borough: "Queens" }));
+    expect(body.summary.total_matching).toBe(0);
+    expect(body.returned).toBe(0);
+    // Two summary probes ("99999" then "999-99"); no detail call on a true zero.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Echoes what the user searched (no phantom correction).
+    expect(body.query.house_number).toBe("99999");
+    expect(body.query.house_number_searched).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -376,11 +491,13 @@ describe("who_owns", () => {
   });
 
   it("returns found:false and skips the contacts call when no registration matches", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse([]));
+    // Queens "9999" probes the literal then the hyphenated "99-99"; both empty,
+    // so no contacts call follows (2 registration probes, 0 contact fetches).
+    fetchMock.mockResolvedValue(jsonResponse([]));
     const body = payload(await call("who_owns", { house_number: "9999", street: "Nowhere", borough: "Queens" }));
     expect(body.found).toBe(false);
     expect(body.contacts).toEqual([]);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -390,6 +507,8 @@ describe("who_owns", () => {
 
 describe("landlord_litigation", () => {
   it("searches by respondent name and normalizes penalty / harassment fields", async () => {
+    // Two queries: a server-side $group summary, then the detail page.
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ casestatus: "CLOSED", n: "1" }, { casestatus: "OPEN", n: "1" }]));
     fetchMock.mockResolvedValueOnce(jsonResponse(LITIGATION_ROWS));
     const body = payload(await call("landlord_litigation", { respondent: "realty llc" }));
     expect(whereOf(0)).toContain("upper(respondent) like '%REALTY LLC%'");
@@ -400,7 +519,24 @@ describe("landlord_litigation", () => {
     expect(withFinding.respondent).toBe("2084 CRESTON AVENUE REALTY LLC");
   });
 
+  // The by-status summary must be a server-side $group over ALL matches,
+  // not a tally of the returned page (which is capped at `limit`).
+  it("summarizes case status server-side over all matches, not just the returned page", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ casestatus: "CLOSED", n: "200" }, { casestatus: "OPEN", n: "50" }]));
+    fetchMock.mockResolvedValueOnce(jsonResponse(LITIGATION_ROWS)); // only 2 rows on the page
+    const body = payload(await call("landlord_litigation", { respondent: "realty", limit: 2 }));
+    // The summary query uses $group + count(1), like building_violations.
+    expect(urlOf(0).searchParams.get("$group")).toBe("casestatus");
+    expect(urlOf(0).searchParams.get("$select")).toContain("count(1)");
+    // Counts reflect all 250 matches even though only 2 rows were returned.
+    expect(body.summary.total_matching).toBe(250);
+    expect(body.summary.by_status).toEqual({ CLOSED: 200, OPEN: 50 });
+    expect(body.returned).toBe(2);
+  });
+
   it("searches by building using the numeric boroid", async () => {
+    // Summary $group (which also probes house-number variants) then detail.
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ casestatus: "CLOSED", n: "1" }]));
     fetchMock.mockResolvedValueOnce(jsonResponse([LITIGATION_ROWS[0]]));
     const body = payload(await call("landlord_litigation", { house_number: "1694", street: "Walton Avenue", borough: "Bronx" }));
     const w = whereOf(0);
@@ -491,5 +627,12 @@ describe("app token + error handling", () => {
 
   it("rejects an unknown tool with a protocol error", async () => {
     await expect(call("does_not_exist", {})).rejects.toThrow();
+  });
+
+  it("issues each request with an AbortSignal timeout", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([EVICTION_ROW]));
+    await call("eviction_lookup", { court_index_number: "123456/24" });
+    const init = fetchMock.mock.calls.at(-1)?.[1] as { signal?: unknown };
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 });

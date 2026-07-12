@@ -5,15 +5,10 @@
   "type": "module",
   "license": "MIT",
   "author": "Abishai James",
-  "bin": {
-    "mcp-nychousing": "./index.ts"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/haksanlulz/mcp-nychousing.git"
   },
-  "files": [
-    "index.ts",
-    "server.ts",
-    "README.md",
-    "LICENSE"
-  ],
   "engines": {
     "node": ">=18"
   },
