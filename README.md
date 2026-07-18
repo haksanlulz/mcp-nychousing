@@ -107,12 +107,14 @@ Call `building_violations` with `{ "house_number": "1520", "street": "Sedgwick A
     {
       "violation_id": "19051745",
       "apartment": "2D",
+      "story": "2",
       "class": "C",
       "description": "HMC ADM CODE: ... ABATE THE INFESTATION CONSISTING OF MICE ...",
       "current_status": "NOTICE OF ISSUANCE SENT TO TENANT",
       "is_open": true,
       "rent_impairing": false,
       "inspection_date": "2026-07-04T00:00:00.000",
+      "nov_issued_date": "2026-07-08T00:00:00.000",
       "nov_type": "Original"
     }
   ]
@@ -167,6 +169,10 @@ npm test         # vitest, fetch mocked (no network)
 npm run smoke    # one live call per tool against SODA (keyless, no setup)
 npm run typecheck
 ```
+
+## AI assistance
+
+This project was built with AI assistance (Claude). Correctness was established by the mocked vitest suite, by running every tool live against NYC Open Data (`npm run smoke`; the Queens hyphenated-house-number, NY/NYC borough, and litigation-summary fixes all came from live behavior, not mocks), and by typecheck. The author reviews the code and is accountable for it.
 
 ## License
 
