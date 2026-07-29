@@ -49,13 +49,32 @@ Dataset ids and column notes:
 
 ## Install
 
-No build step. Runs directly on [tsx](https://github.com/privatenumber/tsx).
+Nothing to clone. Point your MCP client at it and npm fetches it on first run:
 
+```json
+{
+  "mcpServers": {
+    "nychousing": {
+      "command": "npx",
+      "args": ["-y", "@haksanlulz/mcp-nychousing"],
+      "env": { "NYC_APP_TOKEN": "your-nyc-app-token" }
+    }
+  }
+}
 ```
-git clone https://github.com/haksanlulz/mcp-nychousing.git
+
+<details>
+<summary>From source (contributors)</summary>
+
+```bash
+git clone https://github.com/haksanlulz/mcp-nychousing
 cd mcp-nychousing
 npm install
+npm run build     # emits dist/; the published bin is dist/index.js
 ```
+
+`npm start` runs the TypeScript directly via [`tsx`](https://github.com/privatenumber/tsx) without building.
+</details>
 
 ## App token (optional)
 
@@ -71,19 +90,6 @@ setx NYC_APP_TOKEN your-token-here      # Windows (new shells)
 The token is never logged.
 
 ## MCP client config
-
-Point your MCP client at `index.ts` via tsx. Use an absolute path.
-
-```json
-{
-  "mcpServers": {
-    "nychousing": {
-      "command": "npx",
-      "args": ["tsx", "/absolute/path/to/mcp-nychousing/index.ts"]
-    }
-  }
-}
-```
 
 Add an `"env": { "NYC_APP_TOKEN": "your-token-here" }` block only if you want the higher rate limit.
 
