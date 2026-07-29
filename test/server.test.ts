@@ -825,6 +825,15 @@ describe("app token + error handling", () => {
     expect(lastInit().headers["X-App-Token"]).toBe("tok_abc");
   });
 
+  it("identifies itself to NYC Open Data with a descriptive User-Agent", async () => {
+    // Socrata is a free public service and rate-limits anonymous clients harder.
+    // A missing UA is invisible to every other assertion in this file, which is
+    // how the sibling wagewatch server shipped without one until 2026-07-29.
+    fetchMock.mockResolvedValueOnce(jsonResponse([EVICTION_ROW]));
+    await call("eviction_lookup", { court_index_number: "123456/24" });
+    expect(lastInit().headers["User-Agent"]).toMatch(/^mcp-nychousing\/\d/);
+  });
+
   it("surfaces an HTTP 500 (with the SODA message) as isError", async () => {
     fetchMock.mockResolvedValueOnce(
       textResponse(JSON.stringify({ error: true, message: "boom" }), { ok: false, status: 500 }),
