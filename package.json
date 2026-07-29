@@ -1,5 +1,5 @@
 {
-  "name": "mcp-nychousing",
+  "name": "@haksanlulz/mcp-nychousing",
   "version": "1.0.0",
   "description": "MCP server over NYC Open Data (Socrata/SODA) for NYC housing data: HPD violations, complaints, building ownership, landlord portfolios (reverse ownership lookup by name), HPD litigation, and marshal evictions, built for tenant organizers, housing-court legal aid, and Right-to-Counsel orgs.",
   "type": "module",
@@ -13,10 +13,13 @@
     "node": ">=18"
   },
   "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build && npm run typecheck && npm test",
+    "smoke": "tsx smoke.ts",
     "start": "tsx index.ts",
     "test": "vitest run",
-    "smoke": "tsx smoke.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:pack": "node scripts/pack-probe.mjs"
   },
   "keywords": [
     "mcp",
@@ -39,5 +42,15 @@
     "tsx": "^4.23.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
+  },
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-nychousing": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
