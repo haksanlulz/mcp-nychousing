@@ -16,8 +16,14 @@ precedent: `mcp-scryfall/GAUNTLET.md`.
   identifies itself.
 - **Non-goals**: tenant PII storage, legal advice, anything that implies a case outcome.
 
-⚠️ **§1 is transcribed from the README, not elicited from the operator.** Treat
-the clauses above as inferred until he ratifies or rewrites them.
+- **MUST NEVER** (operator, 2026-07-29): *"It implies a case outcome."* These are
+  administrative records with narrow meanings — HPD workflow codes, and evictions
+  captured only at marshal execution. Nothing this server returns establishes who
+  won, who was at fault, or whether an action was justified, and no absence of a
+  record is evidence that nothing happened. Locked by SPEC `no-implied-outcome`.
+
+⚠️ The three bullets above the MUST NEVER line are still transcribed from the
+README rather than elicited; the MUST NEVER clause is operator-authored.
 
 ## §2 Channel map
 
@@ -41,6 +47,7 @@ the clauses above as inferred until he ratifies or rewrites them.
 | Every request identifies itself to NYC Open Data | vitest asserts `User-Agent` matches `^mcp-nychousing/\d` | ✅ **added 2026-07-29, mutation-probed red** |
 | Token never enters the query string | vitest asserts header-only auth | ✅ present |
 | Published tarball ships no tests/tooling | `files` whitelist + `npm pack --dry-run` | ✅ **added 2026-07-29** — `files: ["dist"]`; `verify:pack` fails if any source, test or tsconfig appears in the tarball |
+| Every record states its scope (SPEC `no-implied-outcome`) | vitest ×3 — litigation, evictions, and the empty result | ✅ **added 2026-07-29**, written RED first |
 
 ## §4 Ladder
 
@@ -58,8 +65,25 @@ The npm channel itself is covered by `verify:pack`, which CI runs on every push.
 
 ## §5 Acceptance specs
 
-*(Operator-owned. None authored yet — this section is deliberately empty rather
-than seeded with my guesses. The §1 clauses above are the natural first three.)*
+### SPEC no-implied-outcome
+```
+Given HPD litigation records or the marshal-executed eviction dataset
+When either is returned
+Then the payload states what that record does and does not establish
+```
+Per-tool, not one generic disclaimer — a generic one gets ignored, and each
+dataset has a different wrong reading a reasonable person reaches for.
+`case_status: CLOSED` is an HPD workflow code, not a ruling. The eviction set
+begins at marshal execution, so no row does **not** mean no case was filed.
+The empty-result case is explicitly covered: that is where a reader is most
+likely to infer "clean record", so it must never ship the note-less shape.
+
+Check: `test/server.test.ts` (tagged `spec: no-implied-outcome`), three cases —
+litigation, evictions, and the empty result.
+**Red-capable:** written RED first; all three failed before `withRecordScope`
+existed (2026-07-29).
+
+*Slots 2 and 3 are open and operator-owned.*
 
 ## §6 Escape log
 
@@ -101,8 +125,10 @@ to return a negative is not evidence** (workspace Audit Discipline Rules 22/23).
 1. **README-as-artifact.** It is what LobeHub and Glama render, and it still documents the
    old clone-and-point-tsx-at-it install. Nothing checks the documented path executes, and
    the published package now supports a shorter one. **Highest-value remaining item.**
-2. **§5 is empty** — no operator-authored acceptance specs anywhere in the set. §1 is also
-   transcribed rather than elicited, so both operator-owned sections are unratified.
+2. **§5 holds one spec of a planned three** — the operator's stated MUST-NEVER for this
+   server is authored, implemented and linked (2026-07-29). Slots 2 and 3 are open. §1's
+   descriptive bullets are still transcribed from the README rather than elicited; only the
+   MUST NEVER clause is in his words.
 3. **vitest version drift** — fairrent 2.1.9, the siblings 4.1.10, for no recorded reason.
 4. **`smoke` is in-memory, not stdio.** `verify:pack` now covers the real-stdio channel, so
    smoke's remaining job is the live upstream contract. Its name oversells it.

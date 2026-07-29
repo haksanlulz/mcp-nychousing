@@ -862,3 +862,41 @@ describe("app token + error handling", () => {
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 });
+
+// ---------------------------------------------------------------------------
+// SPEC no-implied-outcome — operator-authored 2026-07-29
+// ---------------------------------------------------------------------------
+
+describe("SPEC no-implied-outcome", () => {
+  // spec: no-implied-outcome
+  // Given HPD litigation records and the marshal-executed eviction dataset
+  // When either is returned
+  // Then the result says what the record does and does not establish, so no
+  //      reader concludes a case was won, lost, or justified from a status code.
+  // Operator's stated worst failure for this server: "it implies a case outcome."
+  it("litigation results state that a status code is not an outcome", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(LITIGATION_ROWS));
+    const body = payload(await call("landlord_litigation", { respondent: "realty llc" }));
+    expect(body).toHaveProperty("record_scope");
+    const note = String(body.record_scope).toLowerCase();
+    expect(note).toContain("not");
+    expect(note).toContain("outcome");
+  });
+
+  it("eviction results state that the dataset is executed-only", async () => {
+    // The single most available wrong inference: no row means no eviction was
+    // ever filed. It does not. This dataset begins at marshal execution.
+    fetchMock.mockResolvedValue(jsonResponse([EVICTION_ROW]));
+    const body = payload(await call("eviction_lookup", { borough: "MANHATTAN" }));
+    expect(body).toHaveProperty("record_scope");
+    expect(String(body.record_scope).toLowerCase()).toContain("marshal");
+  });
+
+  it("an empty result still carries the scope note", async () => {
+    // An empty answer is where a reader is MOST likely to infer "clean record",
+    // so this is the case that must never ship the note-less shape.
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("landlord_litigation", { respondent: "nobody" }));
+    expect(body).toHaveProperty("record_scope");
+  });
+});

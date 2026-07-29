@@ -1205,6 +1205,55 @@ const HANDLERS: Record<string, (args: Row) => Promise<unknown>> = {
 // Server factory
 // ---------------------------------------------------------------------------
 
+/**
+ * SPEC no-implied-outcome.
+ *
+ * Every dataset here is an administrative record with a narrow meaning, and
+ * each one has a specific wrong reading a reasonable person reaches for:
+ *   - `case_status` / `case_judgement` are HPD's own workflow codes. CLOSED
+ *     does not mean the landlord won, and it does not mean the tenant lost.
+ *   - the eviction dataset begins at marshal EXECUTION. No row does not mean
+ *     no case was filed, and a row says nothing about whether it was justified.
+ *   - violations and complaints are allegations and inspection findings, which
+ *     are not the same thing as each other and neither is a ruling.
+ *
+ * The note is per-tool because a single generic disclaimer would be ignored.
+ * It rides the payload for the same reason as the sibling servers: the model
+ * has the payload in hand when it writes the sentence a person actually reads.
+ */
+const RECORD_SCOPE: Record<string, string> = {
+  landlord_litigation:
+    "HPD housing-litigation records. case_status and case_judgement are HPD's " +
+    "administrative codes for the proceeding, not a court's ruling on the merits — " +
+    "they do not establish who won, who was at fault, or the outcome of any case. " +
+    "No matching record does not mean no litigation exists.",
+  eviction_lookup:
+    "Marshal-executed evictions only. This dataset begins when a city marshal " +
+    "carries out a warrant, so it excludes cases filed, settled, withdrawn, or " +
+    "still pending — absence is not evidence that no eviction proceeding occurred. " +
+    "A listed eviction records that one was executed, not that it was justified.",
+  building_violations:
+    "HPD-issued violations: inspection findings on a date, with their own open/close " +
+    "workflow codes. Not court outcomes, and not a current condition report.",
+  building_complaints:
+    "Tenant-reported complaints. These are allegations recorded by HPD, not findings, " +
+    "and not outcomes.",
+  who_owns:
+    "HPD registration filings, which record who registered the building, not who " +
+    "beneficially owns it. Registrations lapse and go stale.",
+  landlord_portfolio:
+    "Buildings matched by registered-party name. Name matching is approximate and " +
+    "distinct entities can share a name; this is not proof of common ownership.",
+};
+
+function withRecordScope(name: string, result: unknown): unknown {
+  const scope = RECORD_SCOPE[name];
+  if (!scope) return result;
+  if (result === null || typeof result !== "object") return { result, record_scope: scope };
+  if (Array.isArray(result)) return { results: result, record_scope: scope };
+  return { ...(result as Record<string, unknown>), record_scope: scope };
+}
+
 export function createServer(): Server {
   const server = new Server(
     { name: "mcp-nychousing", version: "1.0.0" },
@@ -1221,7 +1270,7 @@ export function createServer(): Server {
     }
     try {
       const result = await handler((args ?? {}) as Row);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(withRecordScope(name, result), null, 2) }] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {
