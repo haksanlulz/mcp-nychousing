@@ -120,6 +120,20 @@ while the siblings run 4.1.10. A rate-limiter read called fairrent's throttle na
 it is correctly serialized. **Standing rule for this repo: a probe that cannot be shown
 to return a negative is not evidence** (workspace Audit Discipline Rules 22/23).
 
+### 2026-08-23 — 1.1.0: four tools over eleven new datasets (behavior-change class)
+
+`building_profile` (nine-dataset one-call aggregate), `true_owner` (PLUTO ->
+ACRIS -> Speculation Watch ownership chain), `dob_building`, `building_311`.
+Every dataset id and each dataset's borough encoding was probed live BEFORE
+use (five distinct encodings: uppercase text, Title Case, 2-letter, numeric
+1-5, and DOB complaints with no borough column at all — community-board first
+digit instead). Rungs run: 57 tests, typecheck, live smoke 10/10 keyless,
+verify:pack. One live failure during the rung: building_311's summary query
+full-scanned the ~40M-row table and timed out at 15s; fixed by riding the
+indexed $q with the LIKE as refiner, then re-smoked green. pack-probe now
+parses npm's --json in both its array and object-keyed shapes (npm 11 changed
+it; found because the rung failed here, not in CI).
+
 ## Known gaps, ranked by blast radius
 
 1. **README-as-artifact.** It is what LobeHub and Glama render, and it still documents the
