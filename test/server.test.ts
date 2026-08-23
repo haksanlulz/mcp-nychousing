@@ -1104,3 +1104,44 @@ describe("building_311", () => {
   });
 });
 
+
+
+describe("ux fixes 1.1.1", () => {
+  it("a zero-result building lookup names the tried variants and the substring trick", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_violations", { house_number: "120 15", street: "Sedgwich Av", borough: "Queens" }));
+    expect(body.summary.total_matching).toBe(0);
+    const note = String(body.note);
+    expect(note).toContain("Tried house-number spellings:");
+    expect(note).toContain("120-15"); // the variant it already tried, named
+    expect(note).toContain("substring");
+  });
+
+  it("who_owns miss teaches the same rescues", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("who_owns", { house_number: "12015", street: "Queens Boulevard", borough: "Queens" }));
+    expect(body.found).toBe(false);
+    expect(String(body.note)).toContain("120-15");
+    expect(String(body.note)).toContain("substring-matched");
+  });
+
+  it("true_owner chases the latest DEED when the newest documents hold none", async () => {
+    const SUBM = { document_id: "2025081500001001", doc_type: "SUBM", recorded_datetime: "2025-08-15T00:00:00.000" };
+    const DEED = { document_id: "2019010100001001", doc_type: "DEED", document_date: "2018-12-20T00:00:00.000", recorded_datetime: "2019-01-01T00:00:00.000", document_amt: "12500000" };
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([PLUTO_ROW])) // pluto
+      .mockResolvedValueOnce(jsonResponse([{ document_id: "2025081500001001" }, { document_id: "2019010100001001" }])) // legals
+      .mockResolvedValueOnce(jsonResponse([SUBM])) // newest N: no deed
+      .mockResolvedValueOnce(jsonResponse([])) // parties for shown docs
+      .mockResolvedValueOnce(jsonResponse([DEED])) // the deed chase
+      .mockResolvedValueOnce(jsonResponse(ACRIS_PARTY_ROWS)) // deed parties
+      .mockResolvedValueOnce(jsonResponse([])); // speculation
+    const body = payload(await call("true_owner", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx", docs_limit: 1 }));
+    expect(body.latest_deed).not.toBeNull();
+    expect(body.latest_deed.doc_type).toBe("DEED");
+    expect(body.latest_deed.party_2).toEqual(["WFHA 1520 SEDGWICK LP"]);
+    // The deed-chase where clause filters the doc family server-side.
+    const deedCall = fetchMock.mock.calls.find((c: unknown[]) => String((c[0] as URL).searchParams.get("$where") ?? "").includes("doc_type like 'DEED%'"));
+    expect(deedCall).toBeDefined();
+  });
+});

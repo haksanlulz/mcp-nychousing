@@ -433,6 +433,23 @@ async function tryHouseNumberVariants<T>(
   return { houseNumber: first!.houseNumber, matchedVariant: false, value: first!.value };
 }
 
+/**
+ * Guidance for an empty per-building result. Two distinct rescues, learned
+ * from live misses: (1) the house-number variants the server ALREADY tried —
+ * without naming them, a reader retypes "120-15" by hand and gets the same
+ * zero; (2) the street field is substring-matched, so the shortest
+ * distinctive fragment ("Sedgwick", not "Sedgwich Av") is the reliable form.
+ */
+function emptyBuildingNote(triedVariants: string[], street: string): string {
+  const tried = triedVariants.length > 1 ? `Tried house-number spellings: ${triedVariants.join(", ")}. ` : "";
+  return (
+    `No rows matched. ${tried}` +
+    `Street is matched as a substring — a misspelling returns zero, so try the shortest distinctive ` +
+    `fragment of the street name (e.g. "Sedgwick" rather than ${JSON.stringify(street)}), and check ` +
+    "the borough. A true zero and a wrong-spelling zero look identical without this."
+  );
+}
+
 /** Turn an aggregate `[{key, n}]` result into a { key: count } object + total. */
 function tally(rows: Row[], keyField: string): { total: number; by: Record<string, number> } {
   const by: Record<string, number> = {};
@@ -1023,7 +1040,9 @@ async function buildingViolations(args: Row): Promise<unknown> {
     summary: { total_matching: total, by_class: by },
     note: resolved.matchedVariant
       ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
-      : undefined,
+      : total === 0
+        ? emptyBuildingNote(variants, street)
+        : undefined,
     returned: results.length,
     results,
   };
@@ -1082,7 +1101,9 @@ async function buildingComplaints(args: Row): Promise<unknown> {
     summary: { total_matching: total, by_status: by },
     note: resolved.matchedVariant
       ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
-      : undefined,
+      : total === 0
+        ? emptyBuildingNote(variants, street)
+        : undefined,
     returned: results.length,
     results,
   };
@@ -1116,12 +1137,14 @@ async function whoOwns(args: Row): Promise<unknown> {
     borough: boro.text,
   };
   if (registrations.length === 0) {
+    const tried = variants.length > 1 ? ` Tried house-number spellings: ${variants.join(", ")}.` : "";
     return {
       query,
       found: false,
       note:
-        "No current HPD registration matched. A building may be unregistered, registered under a " +
-        "different street spelling, or below the registration threshold. Try building_violations to confirm the address.",
+        `No current HPD registration matched.${tried} A building may be unregistered, registered under a ` +
+        "different street spelling (street is substring-matched — try the shortest distinctive fragment), " +
+        "or below the registration threshold (1-2 family homes often are). Try building_violations to confirm the address.",
       registrations: [],
       contacts: [],
     };
@@ -1583,7 +1606,10 @@ async function trueOwner(args: Row): Promise<unknown> {
       note:
         "No PLUTO tax lot matched that address. PLUTO stores one combined address line per lot " +
         '(e.g. "1520 SEDGWICK AVENUE"); try the exact street spelling, or a corner building\'s ' +
-        "other street. who_owns (HPD registration) may still answer.",
+        "other street. who_owns (HPD registration) may still answer." +
+        (boro.short === "SI"
+          ? " Note: even with a PLUTO match, Staten Island deeds live with the Richmond County Clerk, not ACRIS."
+          : ""),
       lots: [],
       acris_documents: [],
       speculation_watch: [],
@@ -1597,6 +1623,7 @@ async function trueOwner(args: Row): Promise<unknown> {
   // ACRIS: legals (borough/block/lot -> document ids) -> master (type/date/amt)
   // -> parties (names). Staten Island is not in ACRIS at all.
   let acrisDocs: Record<string, unknown>[] = [];
+  let latestDeed: Record<string, unknown> | null = null;
   let acrisNote: string | undefined;
   if (boro.short === "SI") {
     acrisNote =
@@ -1632,6 +1659,26 @@ async function trueOwner(args: Row): Promise<unknown> {
       if (docIds.length > 150) {
         acrisNote = `This lot has ${docIds.length} recorded documents; the ${docsLimit} newest of the first 150 are shown.`;
       }
+      // "Who bought this building last" is the headline question, and the
+      // newest N documents are often SUBM/AGMT paperwork with the last deed
+      // buried deeper (live: 1520 Sedgwick's top 3 held no deed at all). Chase
+      // the latest DEED-family instrument specifically, one extra query.
+      if (!acrisDocs.some((d) => String(d.doc_type ?? "").startsWith("DEED"))) {
+        const deedRows = await sodaGet(DATASET.acrisMaster, {
+          $where: whereAnd([inText("document_id", docIds.slice(0, 150)), `doc_type like 'DEED%'`]),
+          $order: "recorded_datetime DESC",
+          $limit: 1,
+        });
+        if (deedRows.length) {
+          const deedId = str(deedRows[0].document_id);
+          const deedParties = deedId
+            ? await sodaGet(DATASET.acrisParties, { $where: eqText("document_id", deedId), $limit: 50 })
+            : [];
+          latestDeed = normAcrisDoc(deedRows[0], deedParties);
+        }
+      } else {
+        latestDeed = acrisDocs.find((d) => String(d.doc_type ?? "").startsWith("DEED")) ?? null;
+      }
     }
   }
 
@@ -1656,6 +1703,7 @@ async function trueOwner(args: Row): Promise<unknown> {
     found: true,
     assessor_owner: first.owner_name ?? null,
     lots,
+    latest_deed: latestDeed,
     acris_documents: acrisDocs,
     acris_note: acrisNote,
     speculation_watch: speculation,
