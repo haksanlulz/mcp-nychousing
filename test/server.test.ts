@@ -287,14 +287,18 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("tool registration", () => {
-  it("lists exactly the six documented tools", async () => {
+  it("lists exactly the ten documented tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "building_311",
       "building_complaints",
+      "building_profile",
       "building_violations",
+      "dob_building",
       "eviction_lookup",
       "landlord_litigation",
       "landlord_portfolio",
+      "true_owner",
       "who_owns",
     ]);
     for (const t of tools) expect(t.inputSchema.type).toBe("object");
@@ -900,3 +904,203 @@ describe("SPEC no-implied-outcome", () => {
     expect(body).toHaveProperty("record_scope");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 1.1.0 tools: building_profile, true_owner, dob_building, building_311
+// ---------------------------------------------------------------------------
+
+const PLUTO_ROW = {
+  address: "1520 SEDGWICK AVENUE",
+  bbl: "2032870050.00000000",
+  block: "3287",
+  lot: "50",
+  ownername: "WFHA 1520 SEDGWICK LP",
+  bldgclass: "D3",
+  landuse: "03",
+  unitsres: "120",
+  unitstotal: "121",
+  yearbuilt: "1968",
+  numfloors: "10",
+  zipcode: "10453",
+};
+const ACRIS_LEGAL_ROWS = [{ document_id: "2019010100001001" }, { document_id: "2015060900002001" }];
+const ACRIS_MASTER_ROWS = [
+  {
+    document_id: "2019010100001001",
+    doc_type: "DEED",
+    document_date: "2018-12-20T00:00:00.000",
+    recorded_datetime: "2019-01-01T00:00:00.000",
+    document_amt: "12500000",
+    percent_trans: "100",
+  },
+];
+const ACRIS_PARTY_ROWS = [
+  { document_id: "2019010100001001", party_type: "1", name: "OLD OWNER LLC" },
+  { document_id: "2019010100001001", party_type: "2", name: "WFHA 1520 SEDGWICK LP" },
+];
+const SPEC_ROW = {
+  bbl: "2032870050",
+  hnum_lo: "1520",
+  str_name: "SEDGWICK AVENUE",
+  grantee: "WFHA 1520 SEDGWICK LP",
+  deed_date: "2019-01-01T00:00:00.000",
+  price: "12500000",
+  cap_rate: "0.01",
+  borough_cap_rate: "0.05",
+  block: "3287",
+  lot: "50",
+};
+
+describe("true_owner", () => {
+  it("chains PLUTO -> ACRIS legals -> master -> parties -> speculation and labels the roles", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([PLUTO_ROW]))
+      .mockResolvedValueOnce(jsonResponse(ACRIS_LEGAL_ROWS))
+      .mockResolvedValueOnce(jsonResponse(ACRIS_MASTER_ROWS))
+      .mockResolvedValueOnce(jsonResponse(ACRIS_PARTY_ROWS))
+      .mockResolvedValueOnce(jsonResponse([SPEC_ROW]));
+    const body = payload(await call("true_owner", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+
+    expect(body.found).toBe(true);
+    expect(body.assessor_owner).toBe("WFHA 1520 SEDGWICK LP");
+    // PLUTO is queried with the 2-letter borough code and a combined-address LIKE.
+    expect(urlOf(0).pathname).toContain("64uk-42ks.json");
+    expect(whereOf(0)).toContain("borough='BX'");
+    expect(whereOf(0)).toContain("upper(address) like '%1520 SEDGWICK AVENUE%'");
+    // ACRIS legals by borough/block/lot as quoted text.
+    expect(urlOf(1).pathname).toContain("8h5j-fqxa.json");
+    expect(whereOf(1)).toContain("borough='2'");
+    expect(whereOf(1)).toContain("block='3287'");
+    // The deed's parties are attached with their role semantics.
+    expect(body.acris_documents).toHaveLength(1);
+    expect(body.acris_documents[0].doc_type).toBe("DEED");
+    expect(body.acris_documents[0].party_1).toEqual(["OLD OWNER LLC"]);
+    expect(body.acris_documents[0].party_2).toEqual(["WFHA 1520 SEDGWICK LP"]);
+    expect(body.speculation_watch).toHaveLength(1);
+    expect(body).toHaveProperty("record_scope");
+  });
+
+  it("Staten Island skips ACRIS entirely and says why", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([{ ...PLUTO_ROW, bbl: "5012340001.00000000" }]))
+      .mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("true_owner", { house_number: "100", street: "Bay Street", borough: "SI" }));
+    expect(body.found).toBe(true);
+    expect(String(body.acris_note)).toContain("Richmond County Clerk");
+    expect(body.acris_documents).toEqual([]);
+    // No ACRIS dataset may be queried for SI.
+    const paths = fetchMock.mock.calls.map((c: unknown[]) => (c[0] as URL).pathname);
+    expect(paths.some((p: string) => p.includes("8h5j-fqxa") || p.includes("bnx9-e6tj"))).toBe(false);
+  });
+
+  it("a miss explains the combined-address format instead of a bare empty", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("true_owner", { house_number: "1", street: "Nowhere", borough: "Bronx" }));
+    expect(body.found).toBe(false);
+    expect(String(body.note)).toContain("PLUTO");
+  });
+});
+
+describe("building_profile", () => {
+  it("aggregates the nine sections from one resolved address", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW])) // resolveBuilding: registrations
+      .mockResolvedValueOnce(jsonResponse(CONTACT_ROWS)) // contacts
+      .mockResolvedValueOnce(jsonResponse(VIOLATION_SUMMARY)) // violations by class
+      .mockResolvedValueOnce(jsonResponse(COMPLAINT_SUMMARY)) // complaints by status
+      .mockResolvedValueOnce(jsonResponse([{ casestatus: "CLOSED", n: "2" }])) // litigation
+      .mockResolvedValueOnce(jsonResponse([{ n: "3" }])) // evictions count
+      .mockResolvedValueOnce(jsonResponse([])) // aep
+      .mockResolvedValueOnce(jsonResponse([])) // vacate
+      .mockResolvedValueOnce(jsonResponse([])) // bedbug
+      .mockResolvedValueOnce(jsonResponse([{ n: "7" }])); // hwo
+    const body = payload(await call("building_profile", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+
+    expect(body.registered_with_hpd).toBe(true);
+    expect(body.hpd_violations.total).toBe(1036);
+    expect(body.hpd_violations.by_class.C).toBe(281);
+    expect(body.hpd_complaints.by_status.OPEN).toBe(8);
+    expect(body.hpd_litigation.total).toBe(2);
+    expect(body.evictions_executed).toBe(3);
+    expect(body.emergency_repair_charges).toBe(7);
+    expect(body.aep.in_program_history).toBe(false);
+    expect(body).toHaveProperty("record_scope");
+    expect(String(body.next_steps)).toContain("true_owner");
+  });
+
+  it("profile scope says zero is not a clean bill", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_profile", { house_number: "9", street: "Empty St", borough: "Queens" }));
+    expect(String(body.record_scope)).toContain("not that nothing happened");
+  });
+});
+
+describe("dob_building", () => {
+  it("uses the numeric DOB borough code and the community-board prefix for complaints", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([{ violation_category: "V-DOB VIOLATION - ACTIVE", n: "4" }]))
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            isn_dob_bis_viol: "1",
+            number: "V123",
+            issue_date: "20240105",
+            violation_type_code: "LL6291",
+            violation_category: "V-DOB VIOLATION - ACTIVE",
+            description: "BOILER DEFECT",
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(jsonResponse([{ status: "ACTIVE", n: "2" }]))
+      .mockResolvedValueOnce(
+        jsonResponse([
+          { complaint_number: "5551", status: "ACTIVE", date_entered: "01/05/2024", complaint_category: "45", community_board: "205" },
+        ]),
+      );
+    const body = payload(await call("dob_building", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+
+    expect(whereOf(0)).toContain("boro='2'"); // numeric-as-text DOB code, not BRONX
+    expect(whereOf(2)).toContain("starts_with(community_board, '2')");
+    expect(body.violations.total_matching).toBe(4);
+    expect(body.violations.results[0].description).toBe("BOILER DEFECT");
+    expect(body.complaints.by_status.ACTIVE).toBe(2);
+    expect(body).toHaveProperty("record_scope");
+  });
+});
+
+describe("building_311", () => {
+  it("defaults to the heat/hot-water types and returns newest-first with a status summary", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([{ status: "CLOSED", n: "11" }]))
+      .mockResolvedValueOnce(
+        jsonResponse([
+          {
+            unique_key: "1",
+            created_date: "2026-01-15T08:00:00",
+            complaint_type: "HEAT/HOT WATER",
+            descriptor: "ENTIRE BUILDING",
+            status: "CLOSED",
+            incident_address: "1520 SEDGWICK AVENUE",
+          },
+        ]),
+      );
+    const body = payload(await call("building_311", { address: "1520 Sedgwick Avenue", borough: "Bronx" }));
+
+    expect(whereOf(0)).toContain("upper(complaint_type) in ('HEAT/HOT WATER','HEATING')");
+    expect(whereOf(0)).toContain("upper(incident_address) like '%1520 SEDGWICK AVENUE%'");
+    expect(urlOf(1).searchParams.get("$order")).toBe("created_date DESC");
+    expect(body.summary.total_matching).toBe(11);
+    expect(body.results[0].complaint_type).toBe("HEAT/HOT WATER");
+    expect(body).toHaveProperty("record_scope");
+  });
+
+  it("an explicit complaint_type replaces the heat default and is escaped", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_311", { address: "1 Main St", borough: "Queens", complaint_type: "Rodent's" }));
+    expect(whereOf(0)).toContain("upper(complaint_type)='RODENT''S'");
+    expect(whereOf(0)).not.toContain("HEATING");
+    expect(body.summary.total_matching).toBe(0);
+    expect(String(body.note)).toContain("combined line");
+  });
+});
+

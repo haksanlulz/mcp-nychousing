@@ -62,6 +62,19 @@ const DATASET = {
   contacts: "feu5-w2e2",
   litigations: "59kj-x8nc",
   evictions: "6z8x-wfk4",
+  // --- added for the 1.1.0 coverage expansion (each verified live before use) ---
+  dobViolations: "3h2n-5cm9", // DOB violations (BIS): boro is a NUMERIC-as-text code 1-5 (plus legacy junk rows)
+  dobComplaints: "eabe-havv", // DOB complaints: NO borough column; community_board's first digit is the borough code
+  threeOneOne: "erm2-nwe9", // 311 service requests: borough is uppercase text
+  bedbug: "wz6d-d3jb", // HPD bedbug filings: borough uppercase text
+  aep: "hcir-3275", // HPD Alternative Enforcement Program: boro is Title Case text
+  vacate: "tb8q-a3ar", // HPD vacate orders: boro_short_name is the 2-letter code
+  hwo: "sbnd-xujn", // HPD Handyman Work Order (emergency-repair) charges: boro uppercase text
+  pluto: "64uk-42ks", // PLUTO tax lots: borough is the 2-letter code; carries DOF ownername + bbl
+  acrisLegals: "8h5j-fqxa", // ACRIS real property legals: borough/block/lot -> document_id
+  acrisMaster: "bnx9-e6tj", // ACRIS real property master: document_id -> doc type/date/amount
+  acrisParties: "636b-3b5g", // ACRIS real property parties: document_id -> named parties
+  speculationWatch: "adax-9mit", // Speculation Watch List: qualifying flip-risk purchases
 } as const;
 
 /** Where to get a free (optional) Socrata app token; tools work without one. */
@@ -281,16 +294,18 @@ interface Borough {
   id: number;
   /** Canonical uppercase borough text used by most datasets' boro/borough. */
   text: string;
+  /** 2-letter code used by PLUTO's borough and the vacate orders' boro_short_name. */
+  short: string;
   /** Every spelling the Evictions borough column uses for this borough. */
   evictionAliases: string[];
 }
 
 const BOROUGHS: Record<string, Borough> = {
-  MANHATTAN: { id: 1, text: "MANHATTAN", evictionAliases: ["MANHATTAN", "NEW YORK"] },
-  BRONX: { id: 2, text: "BRONX", evictionAliases: ["BRONX"] },
-  BROOKLYN: { id: 3, text: "BROOKLYN", evictionAliases: ["BROOKLYN", "KINGS"] },
-  QUEENS: { id: 4, text: "QUEENS", evictionAliases: ["QUEENS"] },
-  "STATEN ISLAND": { id: 5, text: "STATEN ISLAND", evictionAliases: ["STATEN ISLAND", "RICHMOND"] },
+  MANHATTAN: { id: 1, text: "MANHATTAN", short: "MN", evictionAliases: ["MANHATTAN", "NEW YORK"] },
+  BRONX: { id: 2, text: "BRONX", short: "BX", evictionAliases: ["BRONX"] },
+  BROOKLYN: { id: 3, text: "BROOKLYN", short: "BK", evictionAliases: ["BROOKLYN", "KINGS"] },
+  QUEENS: { id: 4, text: "QUEENS", short: "QN", evictionAliases: ["QUEENS"] },
+  "STATEN ISLAND": { id: 5, text: "STATEN ISLAND", short: "SI", evictionAliases: ["STATEN ISLAND", "RICHMOND"] },
 };
 
 /** Every accepted spelling / abbreviation / code -> canonical borough key. */
@@ -553,6 +568,173 @@ function normEviction(r: Row): Record<string, unknown> {
   };
 }
 
+// --- normalizers for the 1.1.0 datasets ------------------------------------
+
+/** One DOB violation (3h2n-5cm9). DOB BIS dates arrive as raw "YYYYMMDD" strings. */
+function normDobViolation(r: Row): Record<string, unknown> {
+  return {
+    violation_number: str(r.number) ?? str(r.violation_number),
+    isn: str(r.isn_dob_bis_viol),
+    issue_date: str(r.issue_date),
+    violation_type_code: str(r.violation_type_code),
+    violation_category: str(r.violation_category),
+    violation_type: str(r.violation_type),
+    description: str(r.description),
+    disposition_date: str(r.disposition_date),
+    disposition_comments: str(r.disposition_comments),
+    device_number: str(r.device_number),
+  };
+}
+
+/** One DOB complaint (eabe-havv). */
+function normDobComplaint(r: Row): Record<string, unknown> {
+  return {
+    complaint_number: str(r.complaint_number),
+    status: str(r.status),
+    date_entered: str(r.date_entered),
+    complaint_category: str(r.complaint_category),
+    unit: str(r.unit),
+    disposition_date: str(r.disposition_date),
+    disposition_code: str(r.disposition_code),
+    inspection_date: str(r.inspection_date),
+    bin: str(r.bin),
+    community_board: str(r.community_board),
+  };
+}
+
+/** One 311 service request (erm2-nwe9). */
+function norm311(r: Row): Record<string, unknown> {
+  return {
+    unique_key: str(r.unique_key),
+    created_date: str(r.created_date),
+    closed_date: str(r.closed_date),
+    complaint_type: str(r.complaint_type),
+    descriptor: str(r.descriptor),
+    status: str(r.status),
+    resolution_description: str(r.resolution_description),
+    agency: str(r.agency),
+    incident_address: str(r.incident_address),
+    incident_zip: str(r.incident_zip),
+  };
+}
+
+/** One bedbug filing (wz6d-d3jb). */
+function normBedbug(r: Row): Record<string, unknown> {
+  return {
+    filing_date: str(r.filing_date),
+    filing_period_start: str(r.filing_period_start_date),
+    filing_period_end: str(r.filling_period_end_date) ?? str(r.filing_period_end_date),
+    dwelling_units: num(r.of_dwelling_units),
+    infested_units: num(r.infested_dwelling_unit_count),
+    eradicated_units: num(r.eradicated_unit_count),
+    re_infested_units: num(r.re_infested_dwelling_unit),
+  };
+}
+
+/** One vacate order (tb8q-a3ar). */
+function normVacate(r: Row): Record<string, unknown> {
+  return {
+    vacate_order_number: str(r.vacate_order_number),
+    vacate_type: str(r.vacate_type),
+    primary_vacate_reason: str(r.primary_vacate_reason),
+    vacate_effective_date: str(r.vacate_effective_date),
+    rescind_date: str(r.actual_rescind_date),
+    vacated_units: num(r.number_of_vacated_units),
+  };
+}
+
+/** One AEP row (hcir-3275). */
+function normAep(r: Row): Record<string, unknown> {
+  return {
+    aep_round: str(r.aep_round),
+    current_status: str(r.current_status),
+    aep_start_date: str(r.aep_start_date),
+    discharge_date: str(r.discharge_date),
+    total_units: num(r.total_units),
+    bc_violations_at_start: num(r.of_b_c_violations_at_start),
+  };
+}
+
+/** One PLUTO tax lot (64uk-42ks). ownername is DOF's assessment-roll owner. */
+function normPlutoLot(r: Row): Record<string, unknown> {
+  return {
+    address: str(r.address),
+    bbl: str(r.bbl),
+    block: num(r.block),
+    lot: num(r.lot),
+    owner_name: str(r.ownername),
+    building_class: str(r.bldgclass),
+    land_use: str(r.landuse),
+    residential_units: num(r.unitsres),
+    total_units: num(r.unitstotal),
+    year_built: num(r.yearbuilt),
+    num_floors: num(r.numfloors),
+    zip: str(r.zipcode),
+  };
+}
+
+/** One ACRIS master document joined with its parties. */
+function normAcrisDoc(m: Row, parties: Row[]): Record<string, unknown> {
+  const byType: Record<string, string[]> = {};
+  for (const p of parties) {
+    const t = str(p.party_type) ?? "?";
+    const name = str(p.name);
+    if (!name) continue;
+    (byType[t] ??= []).push(name);
+  }
+  return {
+    document_id: str(m.document_id),
+    doc_type: str(m.doc_type),
+    document_date: str(m.document_date),
+    recorded_datetime: str(m.recorded_datetime),
+    document_amount: num(m.document_amt),
+    percent_transferred: num(m.percent_trans),
+    // Party-role semantics VARY BY DOC TYPE: for a deed, party 1 is the
+    // grantor (seller) and party 2 the grantee (buyer); for a mortgage,
+    // party 1 is the borrower and party 2 the lender.
+    party_1: byType["1"] ?? [],
+    party_2: byType["2"] ?? [],
+    party_3: byType["3"] ?? [],
+  };
+}
+
+/** One Speculation Watch List row (adax-9mit). */
+function normSpeculation(r: Row): Record<string, unknown> {
+  return {
+    bbl: str(r.bbl),
+    address: [str(r.hnum_lo), str(r.str_name)].filter(Boolean).join(" ") || null,
+    grantee: str(r.grantee),
+    deed_date: str(r.deed_date),
+    price: num(r.price),
+    cap_rate: num(r.cap_rate),
+    borough_cap_rate: num(r.borough_cap_rate),
+  };
+}
+
+/**
+ * Resolve a building's canonical HPD house-number spelling ONCE (running the
+ * hyphenation variant probe against the registrations dataset), so an
+ * aggregate tool does not re-probe per dataset. Returns the registrations it
+ * found along the way; found=false still carries the literal spelling so the
+ * caller can query the non-HPD datasets with the user's own input.
+ */
+async function resolveBuilding(
+  houseNumberInput: string,
+  street: string,
+  boro: Borough,
+): Promise<{ houseNumber: string; matchedVariant: boolean; registrations: Row[] }> {
+  const variants = houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" });
+  const resolved = await tryHouseNumberVariants(variants, async (houseNumber) => {
+    const rows = await sodaGet(DATASET.registrations, {
+      $where: whereAnd([eqTextCI("housenumber", houseNumber), eqText("boro", boro.text), likeCI("streetname", street)]),
+      $order: "lastregistrationdate DESC",
+      $limit: 10,
+    });
+    return { matched: rows.length > 0, value: rows };
+  });
+  return { houseNumber: resolved.houseNumber, matchedVariant: resolved.matchedVariant, registrations: resolved.value };
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions
 // ---------------------------------------------------------------------------
@@ -690,6 +872,91 @@ const TOOLS: Tool[] = [
         since: { type: "string", description: "Only evictions executed on/after this ISO date (YYYY-MM-DD)." },
         limit: { type: "integer", description: `Max rows to return (1-${MAX_RESULTS}, default 50).` },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "building_profile",
+    description:
+      "One-call condition-and-history profile of a building, aggregating nine city datasets: HPD " +
+      "registration + contacts (who is on file), violation counts by class, complaint counts by " +
+      "status, HPD litigation counts by status, marshal-executed eviction count, Alternative " +
+      "Enforcement Program status, vacate orders, the latest bedbug filings, and HPD emergency-repair " +
+      "(Handyman Work Order) charge count. START HERE for any 'tell me about this building' " +
+      "question, then drill into building_violations / building_complaints / landlord_litigation / " +
+      "dob_building / building_311 / true_owner for detail. Give the house number, street, and " +
+      "borough. Makes ~10 sequential city-API calls (a few seconds). Keyless.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        house_number: { type: "string", description: 'Building house number, e.g. "1520".' },
+        street: { type: "string", description: "Street name (matched case-insensitively as a substring)." },
+        borough: { type: "string", description: BOROUGH_DESC },
+      },
+      required: ["house_number", "street", "borough"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "true_owner",
+    description:
+      "Ownership from the city's PROPERTY records rather than HPD's self-reported filings: the " +
+      "Department of Finance assessment-roll owner (PLUTO), the building's recent recorded deeds and " +
+      "mortgages with their named parties (ACRIS), and any Speculation Watch List hit (a qualifying " +
+      "flip-risk purchase). Complements who_owns: HPD registration says who the landlord TOLD HPD " +
+      "they are; this says what the property record shows. Give the house number, street, and " +
+      "borough. NOTE: ACRIS covers Manhattan, Bronx, Brooklyn, and Queens; Staten Island deeds are " +
+      "recorded with the Richmond County Clerk and will not appear. Keyless.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        house_number: { type: "string", description: 'Building house number, e.g. "1520".' },
+        street: { type: "string", description: "Street name (matched case-insensitively as a substring)." },
+        borough: { type: "string", description: BOROUGH_DESC },
+        docs_limit: { type: "integer", description: "Max recent ACRIS documents to return (1-25, default 8)." },
+      },
+      required: ["house_number", "street", "borough"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "dob_building",
+    description:
+      "Department of Buildings records for one building — a DIFFERENT agency from HPD: construction, " +
+      "structural, elevator, boiler, permit, and illegal-conversion issues live here, not in HPD " +
+      "datasets. Returns DOB violations (with a by-category summary) and DOB complaints (with a " +
+      "by-status summary). Give the house number, street, and borough. DOB dates arrive in the " +
+      "agency's raw formats (often YYYYMMDD) and are returned as published. Keyless.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        house_number: { type: "string", description: 'Building house number, e.g. "1520".' },
+        street: { type: "string", description: "Street name (matched case-insensitively as a substring)." },
+        borough: { type: "string", description: BOROUGH_DESC },
+        limit: { type: "integer", description: `Max rows per section (1-${MAX_RESULTS}, default 50).` },
+      },
+      required: ["house_number", "street", "borough"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "building_311",
+    description:
+      "311 service requests for an address. Defaults to the heat/hot-water complaint types (the top " +
+      "tenant-side habitability signal, and a record HPD complaint data undercounts); pass " +
+      "complaint_type to search any other type instead (e.g. \"UNSANITARY CONDITION\", \"PAINT/PLASTER\", " +
+      "\"Rodent\", \"General Construction/Plumbing\"). Returns matching requests newest-first plus a " +
+      "by-status summary. Give the street address and borough. Keyless.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: 'Street address, e.g. "1520 SEDGWICK AVENUE" (matched case-insensitively as a substring of the 311 incident address).' },
+        borough: { type: "string", description: BOROUGH_DESC },
+        complaint_type: { type: "string", description: "Optional 311 complaint type (exact, case-insensitive). Omit for the heat/hot-water types." },
+        since: { type: "string", description: "Only requests created on/after this ISO date (YYYY-MM-DD)." },
+        limit: { type: "integer", description: `Max requests to return (1-${MAX_RESULTS}, default 50).` },
+      },
+      required: ["address", "borough"],
       additionalProperties: false,
     },
   },
@@ -1192,6 +1459,330 @@ async function evictionLookup(args: Row): Promise<unknown> {
   };
 }
 
+async function buildingProfile(args: Row): Promise<unknown> {
+  const houseNumberInput = reqStr(args.house_number, "house_number");
+  const street = reqStr(args.street, "street");
+  const boro = resolveBorough(args.borough);
+
+  // Resolve the canonical HPD house-number spelling ONCE (Queens hyphenation),
+  // then reuse it for every HPD-keyed dataset below.
+  const resolved = await resolveBuilding(houseNumberInput, street, boro);
+  const hn = resolved.houseNumber;
+  const registrations = resolved.registrations.map(normRegistration);
+
+  // Contacts for the newest registration (who is on file).
+  let contacts: Record<string, unknown>[] = [];
+  const regIds = registrations.map((r) => num((r as Row).registration_id)).filter((n): n is number => n != null);
+  if (regIds.length) {
+    const contactRows = await sodaGet(DATASET.contacts, { $where: inNum("registrationid", regIds.slice(0, 5)), $limit: 100 });
+    contacts = contactRows.map(normContact);
+  }
+
+  // HPD violations by class.
+  const violSummary = await sodaGet(DATASET.violations, {
+    $select: "class,count(1) as n",
+    $where: whereAnd([eqTextCI("housenumber", hn), eqText("boro", boro.text), likeCI("streetname", street)]),
+    $group: "class",
+  });
+  const violations = tally(violSummary, "class");
+
+  // HPD complaints by status.
+  const compSummary = await sodaGet(DATASET.complaints, {
+    $select: "complaint_status,count(1) as n",
+    $where: whereAnd([eqTextCI("house_number", hn), eqText("borough", boro.text), likeCI("street_name", street)]),
+    $group: "complaint_status",
+  });
+  const complaints = tally(compSummary, "complaint_status");
+
+  // HPD litigation by status (boroid is numeric here).
+  const litSummary = await sodaGet(DATASET.litigations, {
+    $select: "casestatus,count(1) as n",
+    $where: whereAnd([eqTextCI("housenumber", hn), eqNum("boroid", boro.id), likeCI("streetname", street)]),
+    $group: "casestatus",
+  });
+  const litigation = tally(litSummary, "casestatus");
+
+  // Marshal-executed evictions (combined-address substring + borough aliases).
+  const evictRows = await sodaGet(DATASET.evictions, {
+    $select: "count(1) as n",
+    $where: whereAnd([likeCI("eviction_address", `${hn} ${street}`), inText("borough", boro.evictionAliases)]),
+  });
+  const evictionsExecuted = num(evictRows[0]?.n) ?? 0;
+
+  // AEP (Title Case boro; upper() both sides handles it), vacate (2-letter),
+  // bedbug (uppercase), HWO charge count (uppercase).
+  const aepRows = await sodaGet(DATASET.aep, {
+    $where: whereAnd([eqTextCI("phn", hn), eqTextCI("boro", boro.text), likeCI("street_address", street)]),
+    $limit: 5,
+  });
+  const vacateRows = await sodaGet(DATASET.vacate, {
+    $where: whereAnd([eqTextCI("house_number", hn), eqText("boro_short_name", boro.short), likeCI("street_name", street)]),
+    $order: "vacate_effective_date DESC",
+    $limit: 10,
+  });
+  const bedbugRows = await sodaGet(DATASET.bedbug, {
+    $where: whereAnd([eqTextCI("house_number", hn), eqText("borough", boro.text), likeCI("street_name", street)]),
+    $order: "filing_date DESC",
+    $limit: 3,
+  });
+  const hwoRows = await sodaGet(DATASET.hwo, {
+    $select: "count(1) as n",
+    $where: whereAnd([eqTextCI("housenumber", hn), eqText("boro", boro.text), likeCI("streetname", street)]),
+  });
+  const emergencyRepairCharges = num(hwoRows[0]?.n) ?? 0;
+
+  return {
+    query: {
+      house_number: hn,
+      house_number_searched: resolved.matchedVariant ? houseNumberInput : undefined,
+      street,
+      borough: boro.text,
+    },
+    registered_with_hpd: registrations.length > 0,
+    registrations,
+    contacts,
+    hpd_violations: { total: violations.total, by_class: violations.by },
+    hpd_complaints: { total: complaints.total, by_status: complaints.by },
+    hpd_litigation: { total: litigation.total, by_status: litigation.by },
+    evictions_executed: evictionsExecuted,
+    aep: { in_program_history: aepRows.length > 0, records: aepRows.map(normAep) },
+    vacate_orders: vacateRows.map(normVacate),
+    bedbug_filings: bedbugRows.map(normBedbug),
+    emergency_repair_charges: emergencyRepairCharges,
+    note: resolved.matchedVariant
+      ? `No exact match for "${houseNumberInput}"; the profile uses HPD's stored house number "${hn}" (NYC outer-borough addresses are stored hyphenated, e.g. 120-15).`
+      : undefined,
+    next_steps:
+      "Detail tools: building_violations / building_complaints (rows), landlord_litigation (cases), " +
+      "eviction_lookup (executed evictions), true_owner (property-record ownership), dob_building " +
+      "(Department of Buildings), building_311 (heat and other 311 requests), landlord_portfolio " +
+      "(other buildings under the same names).",
+  };
+}
+
+async function trueOwner(args: Row): Promise<unknown> {
+  const houseNumberInput = reqStr(args.house_number, "house_number");
+  const street = reqStr(args.street, "street");
+  const boro = resolveBorough(args.borough);
+  const docsLimit = Math.max(1, Math.min(25, Math.floor(num(args.docs_limit) ?? 8)));
+
+  // PLUTO stores one combined address ("1520 SEDGWICK AVENUE") and the 2-letter
+  // borough code. Substring-match the address; return every matching lot but
+  // chain ACRIS off the first.
+  const plutoRows = await sodaGet(DATASET.pluto, {
+    $select: "address,bbl,block,lot,ownername,bldgclass,landuse,unitsres,unitstotal,yearbuilt,numfloors,zipcode",
+    $where: whereAnd([likeCI("address", `${houseNumberInput} ${street}`), eqText("borough", boro.short)]),
+    $limit: 5,
+  });
+  const lots = plutoRows.map(normPlutoLot);
+
+  if (lots.length === 0) {
+    return {
+      query: { house_number: houseNumberInput, street, borough: boro.text },
+      found: false,
+      note:
+        "No PLUTO tax lot matched that address. PLUTO stores one combined address line per lot " +
+        '(e.g. "1520 SEDGWICK AVENUE"); try the exact street spelling, or a corner building\'s ' +
+        "other street. who_owns (HPD registration) may still answer.",
+      lots: [],
+      acris_documents: [],
+      speculation_watch: [],
+    };
+  }
+
+  const first = lots[0] as Row;
+  const block = num(first.block);
+  const lot = num(first.lot);
+
+  // ACRIS: legals (borough/block/lot -> document ids) -> master (type/date/amt)
+  // -> parties (names). Staten Island is not in ACRIS at all.
+  let acrisDocs: Record<string, unknown>[] = [];
+  let acrisNote: string | undefined;
+  if (boro.short === "SI") {
+    acrisNote =
+      "Staten Island deeds and mortgages are recorded with the Richmond County Clerk, not ACRIS; " +
+      "no document history is available from this dataset.";
+  } else if (block != null && lot != null) {
+    // ACRIS/spec columns are text-typed; SODA coerces but the quoted form is
+    // the one both probes accepted, so quote (verified live 2026-08-22).
+    const legalRows = await sodaGet(DATASET.acrisLegals, {
+      $select: "document_id",
+      $where: whereAnd([eqText("borough", String(boro.id)), eqText("block", String(block)), eqText("lot", String(lot))]),
+      $limit: 200,
+    });
+    const docIds = [...new Set(legalRows.map((r) => str(r.document_id)).filter((s): s is string => s != null))];
+    if (docIds.length) {
+      // Newest first by recorded date; then join parties for just the page shown.
+      const masterRows = await sodaGet(DATASET.acrisMaster, {
+        $where: inText("document_id", docIds.slice(0, 150)),
+        $order: "recorded_datetime DESC",
+        $limit: docsLimit,
+      });
+      const shownIds = masterRows.map((m) => str(m.document_id)).filter((s): s is string => s != null);
+      const partyRows = shownIds.length
+        ? await sodaGet(DATASET.acrisParties, { $where: inText("document_id", shownIds), $limit: 400 })
+        : [];
+      const partiesByDoc = new Map<string, Row[]>();
+      for (const p of partyRows) {
+        const id = str(p.document_id);
+        if (!id) continue;
+        (partiesByDoc.get(id) ?? partiesByDoc.set(id, []).get(id)!).push(p);
+      }
+      acrisDocs = masterRows.map((m) => normAcrisDoc(m, partiesByDoc.get(str(m.document_id) ?? "") ?? []));
+      if (docIds.length > 150) {
+        acrisNote = `This lot has ${docIds.length} recorded documents; the ${docsLimit} newest of the first 150 are shown.`;
+      }
+    }
+  }
+
+  // Speculation Watch List: match by block+lot, then confirm borough via the
+  // row's own bbl first digit (the dataset carries several borough encodings).
+  let speculation: Record<string, unknown>[] = [];
+  if (block != null && lot != null) {
+    const specRows = await sodaGet(DATASET.speculationWatch, {
+      $where: whereAnd([eqText("block", String(block)), eqText("lot", String(lot))]),
+      $limit: 10,
+    });
+    speculation = specRows
+      .filter((r) => {
+        const bbl = str(r.bbl);
+        return bbl == null || bbl.startsWith(String(boro.id));
+      })
+      .map(normSpeculation);
+  }
+
+  return {
+    query: { house_number: houseNumberInput, street, borough: boro.text },
+    found: true,
+    assessor_owner: first.owner_name ?? null,
+    lots,
+    acris_documents: acrisDocs,
+    acris_note: acrisNote,
+    speculation_watch: speculation,
+    note:
+      "Three distinct ownership records: PLUTO owner_name is the Department of Finance " +
+      "assessment roll (can lag sales, and for co-ops/condos may name the building entity); ACRIS " +
+      "documents are the recorded instruments themselves (for a deed, party_1 = seller, party_2 = " +
+      "buyer; for a mortgage, party_1 = borrower, party_2 = lender); who_owns is HPD's " +
+      "self-reported registration. When they disagree, the recorded deed is the strongest evidence.",
+  };
+}
+
+async function dobBuilding(args: Row): Promise<unknown> {
+  const houseNumberInput = reqStr(args.house_number, "house_number");
+  const street = reqStr(args.street, "street");
+  const boro = resolveBorough(args.borough);
+  const limit = clampLimit(args.limit, 50);
+
+  // DOB violations: boro is a numeric-as-text code ("1".."5").
+  const violWhere = whereAnd([
+    eqText("boro", String(boro.id)),
+    eqTextCI("house_number", houseNumberInput),
+    likeCI("street", street),
+  ]);
+  const violSummaryRows = await sodaGet(DATASET.dobViolations, {
+    $select: "violation_category,count(1) as n",
+    $where: violWhere,
+    $group: "violation_category",
+  });
+  const violSummary = tally(violSummaryRows, "violation_category");
+  const violRows =
+    violSummary.total > 0
+      ? await sodaGet(DATASET.dobViolations, { $where: violWhere, $order: "issue_date DESC", $limit: limit })
+      : [];
+
+  // DOB complaints: NO borough column; the community board's first digit is the
+  // borough code, so filter with starts_with once a borough is known.
+  const compWhere = whereAnd([
+    eqTextCI("house_number", houseNumberInput),
+    likeCI("house_street", street),
+    `starts_with(community_board, '${boro.id}')`,
+  ]);
+  const compSummaryRows = await sodaGet(DATASET.dobComplaints, {
+    $select: "status,count(1) as n",
+    $where: compWhere,
+    $group: "status",
+  });
+  const compSummary = tally(compSummaryRows, "status");
+  const compRows =
+    compSummary.total > 0
+      ? await sodaGet(DATASET.dobComplaints, { $where: compWhere, $order: "date_entered DESC", $limit: limit })
+      : [];
+
+  return {
+    query: { house_number: houseNumberInput, street, borough: boro.text },
+    violations: {
+      total_matching: violSummary.total,
+      by_category: violSummary.by,
+      returned: violRows.length,
+      results: violRows.map(normDobViolation),
+    },
+    complaints: {
+      total_matching: compSummary.total,
+      by_status: compSummary.by,
+      returned: compRows.length,
+      results: compRows.map(normDobComplaint),
+    },
+    note:
+      "DOB records use the agency's raw formats (dates often YYYYMMDD; complaint categories and " +
+      "disposition codes are DOB's own code tables). DOB house numbers are stored as filed, which " +
+      "for outer-borough addresses may be hyphenated (e.g. 120-15) — if both sections read zero on " +
+      "a Queens address, retry with the hyphenated spelling.",
+  };
+}
+
+async function building311(args: Row): Promise<unknown> {
+  const address = reqStr(args.address, "address");
+  const boro = resolveBorough(args.borough);
+  const complaintType = str(args.complaint_type);
+  const since = normSince(args.since, "since");
+  const limit = clampLimit(args.limit, 50);
+
+  const conditions = [likeCI("incident_address", address), eqTextCI("borough", boro.text)];
+  if (complaintType) {
+    conditions.push(eqTextCI("complaint_type", complaintType));
+  } else {
+    // The current type is HEAT/HOT WATER; HEATING is the pre-2014 label.
+    conditions.push(`upper(complaint_type) in ('HEAT/HOT WATER','HEATING')`);
+  }
+  if (since) conditions.push(gteDate("created_date", since));
+  const where = whereAnd(conditions);
+
+  // The 311 table is ~40M rows and a bare LIKE over incident_address is a full
+  // scan (observed: the summary query times out). $q rides the search index, so
+  // pass the address there to narrow FIRST; the $where LIKE then refines the
+  // candidate set to exact address substring + borough + type.
+  const summaryRows = await sodaGet(DATASET.threeOneOne, {
+    $q: address,
+    $select: "status,count(1) as n",
+    $where: where,
+    $group: "status",
+  });
+  const { total, by } = tally(summaryRows, "status");
+  const rows =
+    total > 0
+      ? await sodaGet(DATASET.threeOneOne, { $q: address, $where: where, $order: "created_date DESC", $limit: limit })
+      : [];
+
+  return {
+    query: {
+      address,
+      borough: boro.text,
+      complaint_type: complaintType ?? "HEAT/HOT WATER (+ legacy HEATING)",
+      since: str(args.since) ?? null,
+    },
+    summary: { total_matching: total, by_status: by },
+    returned: rows.length,
+    results: rows.map(norm311),
+    note:
+      total === 0
+        ? "No matching 311 requests. The 311 incident address is one combined line (e.g. " +
+          '"1520 SEDGWICK AVENUE"); try the exact street spelling, a hyphenated outer-borough house ' +
+          "number, or drop complaint_type to search the heat/hot-water default."
+        : undefined,
+  };
+}
+
 const HANDLERS: Record<string, (args: Row) => Promise<unknown>> = {
   building_violations: buildingViolations,
   building_complaints: buildingComplaints,
@@ -1199,6 +1790,10 @@ const HANDLERS: Record<string, (args: Row) => Promise<unknown>> = {
   landlord_portfolio: landlordPortfolio,
   landlord_litigation: landlordLitigation,
   eviction_lookup: evictionLookup,
+  building_profile: buildingProfile,
+  true_owner: trueOwner,
+  dob_building: dobBuilding,
+  building_311: building311,
 };
 
 // ---------------------------------------------------------------------------
@@ -1244,6 +1839,25 @@ const RECORD_SCOPE: Record<string, string> = {
   landlord_portfolio:
     "Buildings matched by registered-party name. Name matching is approximate and " +
     "distinct entities can share a name; this is not proof of common ownership.",
+  building_profile:
+    "A composite of administrative records, each with its own narrow meaning: " +
+    "violations and complaints are findings and allegations (not rulings), " +
+    "litigation statuses are HPD workflow codes (not outcomes), and the eviction " +
+    "count begins at marshal execution. A zero in any section means no published " +
+    "record matched — not that nothing happened.",
+  true_owner:
+    "Property records, not a beneficial-ownership determination. The assessment-" +
+    "roll owner can lag sales; recorded parties are the names on the instrument, " +
+    "which are often LLCs; a Speculation Watch List entry flags a qualifying " +
+    "purchase, not wrongdoing. Staten Island instruments are not in ACRIS.",
+  dob_building:
+    "Department of Buildings administrative records. Violations are agency " +
+    "findings with their own disposition codes, complaints are unverified " +
+    "reports, and neither is a court outcome or a current condition report.",
+  building_311:
+    "311 service requests are resident reports — allegations, not findings. The " +
+    "responding agency's resolution text describes what the agency says it did. " +
+    "Absence of requests is not evidence a condition did not exist.",
 };
 
 function withRecordScope(name: string, result: unknown): unknown {
@@ -1256,7 +1870,7 @@ function withRecordScope(name: string, result: unknown): unknown {
 
 export function createServer(): Server {
   const server = new Server(
-    { name: "mcp-nychousing", version: "1.0.0" },
+    { name: "mcp-nychousing", version: "1.1.0" },
     { capabilities: { tools: {} } },
   );
 

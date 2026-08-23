@@ -89,6 +89,43 @@ async function main(): Promise<void> {
     (b) => `${b.returned} executed eviction(s); first: ${b.results[0]?.eviction_address ?? "(none)"} on ${b.results[0]?.executed_date ?? "?"}`,
   );
 
+  await check(
+    "building_profile",
+    bldg,
+    (b) =>
+      b.registered_with_hpd === true &&
+      typeof b.hpd_violations?.total === "number" &&
+      typeof b.hpd_complaints?.total === "number" &&
+      typeof b.evictions_executed === "number",
+    (b) =>
+      `viol ${b.hpd_violations.total}, compl ${b.hpd_complaints.total}, lit ${b.hpd_litigation.total}, ` +
+      `evict ${b.evictions_executed}, AEP ${b.aep.in_program_history}, vacate ${b.vacate_orders.length}, ` +
+      `bedbug ${b.bedbug_filings.length}, HWO ${b.emergency_repair_charges}`,
+  );
+
+  await check(
+    "true_owner",
+    bldg,
+    (b) => b.found === true && typeof b.assessor_owner === "string" && Array.isArray(b.acris_documents),
+    (b) =>
+      `assessor: ${b.assessor_owner}; ${b.acris_documents.length} ACRIS doc(s), newest ${b.acris_documents[0]?.doc_type ?? "(none)"} ` +
+      `${b.acris_documents[0]?.recorded_datetime ?? ""}; speculation hits ${b.speculation_watch.length}`,
+  );
+
+  await check(
+    "dob_building",
+    { ...bldg, limit: 3 },
+    (b) => typeof b.violations?.total_matching === "number" && typeof b.complaints?.total_matching === "number",
+    (b) => `DOB viol ${b.violations.total_matching}, DOB compl ${b.complaints.total_matching}`,
+  );
+
+  await check(
+    "building_311",
+    { address: "1520 Sedgwick Avenue", borough: "Bronx", limit: 3 },
+    (b) => b.summary && typeof b.summary.total_matching === "number" && Array.isArray(b.results),
+    (b) => `${b.summary.total_matching} heat/hot-water request(s); by status ${JSON.stringify(b.summary.by_status)}`,
+  );
+
   await client.close();
   await server.close();
 
