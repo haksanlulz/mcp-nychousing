@@ -147,11 +147,7 @@ Call `building_violations` with `{ "house_number": "1520", "street": "Sedgwick A
 
 The counts are illustrative and move as the city updates the data. The `summary` counts every match server-side; `results` is the most recent `limit` of them.
 
-Every response carries a `record_scope` line stating what that specific dataset
-does and does not establish. It is per-tool, because each one has a different
-wrong reading available: `landlord_litigation` returns HPD workflow codes, not
-rulings on the merits, and `eviction_lookup` covers **marshal-executed**
-evictions only — so no matching row does not mean no case was ever filed.
+Every response carries a `record_scope` line stating what that specific dataset does and does not establish. It is per-tool, because each one has a different wrong reading available: `landlord_litigation` returns HPD workflow codes, not rulings on the merits, and `eviction_lookup` covers **marshal-executed** evictions only — so no matching row does not mean no case was ever filed.
 
 Then take a name from `who_owns` output and reverse it. Call `landlord_portfolio` with `{ "name": "WFHA 1520 SEDGWICK LP" }`:
 
