@@ -1,7 +1,7 @@
 {
   "name": "@haksanlulz/mcp-nychousing",
   "version": "1.1.0",
-  "description": "MCP server over NYC Open Data (Socrata/SODA) for NYC housing data: HPD violations, complaints, building ownership, landlord portfolios (reverse ownership lookup by name), HPD litigation, and marshal evictions, built for tenant organizers, housing-court legal aid, and Right-to-Counsel orgs.",
+  "description": "MCP server over NYC Open Data (Socrata/SODA) for NYC housing data: HPD violations, complaints, and litigation, building ownership two ways (HPD registration and the property record: PLUTO assessment roll, ACRIS deeds/mortgages, Speculation Watch List), landlord portfolios, DOB records, 311 heat complaints, marshal evictions, and a one-call building profile. Built for tenant organizers, housing-court legal aid, and Right-to-Counsel orgs.",
   "type": "module",
   "license": "MIT",
   "author": "Abishai James",
@@ -22,17 +22,22 @@
     "verify:pack": "node scripts/pack-probe.mjs"
   },
   "keywords": [
+    "311",
+    "acris",
+    "civic-data",
+    "dob",
+    "evictions",
+    "housing",
+    "hpd",
+    "legal-aid",
     "mcp",
     "model-context-protocol",
     "nyc-open-data",
+    "ownership",
+    "pluto",
     "socrata",
     "soda",
-    "hpd",
-    "housing",
-    "tenant-rights",
-    "evictions",
-    "legal-aid",
-    "civic-data"
+    "tenant-rights"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"

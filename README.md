@@ -1,8 +1,8 @@
 # mcp-nychousing
 
-MCP server for NYC housing data over [NYC Open Data](https://opendata.cityofnewyork.us/) (the Socrata / SODA API). Built for tenant organizers, housing-court legal-aid intake, and Right-to-Counsel orgs: pull a building's HPD violations and complaints, find out who actually owns it (to serve papers), map everything else registered under that owner or agent's name, check HPD litigation against the landlord, and look up marshal-executed evictions.
+MCP server for NYC housing data over [NYC Open Data](https://opendata.cityofnewyork.us/) (the Socrata / SODA API). Built for tenant organizers, housing-court legal-aid intake, and Right-to-Counsel orgs: pull a building's HPD violations and complaints, find out who actually owns it two different ways (HPD's registration filings, and the property record itself: the assessment roll, recorded deeds and mortgages, and Speculation Watch List), map everything else registered under that owner or agent's name, check HPD litigation, Department of Buildings records, 311 heat complaints, and marshal-executed evictions — or pull the whole picture in one `building_profile` call.
 
-It wraps six city datasets and normalizes their raw columns (`novdescription`, `violationstatus`, `registrationid`, `court_index_number`, and so on) into documented tool outputs.
+It wraps seventeen city datasets and normalizes their raw columns (`novdescription`, `violationstatus`, `registrationid`, `court_index_number`, and so on) into documented tool outputs.
 
 ## Tools
 
@@ -15,7 +15,7 @@ It wraps six city datasets and normalizes their raw columns (`novdescription`, `
 | `landlord_litigation` | `house_number` + `street` + `borough`, and/or `respondent`, plus `case_status`, `limit` | HPD Housing Litigations (`59kj-x8nc`) by building or by respondent name. Case type, open date, status, judgement, harassment finding, penalty, respondent, with a by-status summary. |
 | `eviction_lookup` | `court_index_number`, and/or `address`, and/or `borough`, plus `since`, `limit` | Marshal-executed evictions (`6z8x-wfk4`) by court index number or address/borough. Index number, address, executed date, marshal, residential/commercial flag. |
 | `building_profile` | `house_number`, `street`, `borough` (all required) | One-call profile across nine datasets: registration + contacts, violation counts by class, complaint counts by status, litigation counts by status, executed-eviction count, AEP status (`hcir-3275`), vacate orders (`tb8q-a3ar`), latest bedbug filings (`wz6d-d3jb`), and emergency-repair charge count (`sbnd-xujn`). Start here, then drill down. |
-| `true_owner` | `house_number`, `street`, `borough` (all required), `docs_limit` | Ownership from the property record rather than HPD's filings: the DOF assessment-roll owner (PLUTO `64uk-42ks`), recent recorded deeds/mortgages with named parties (ACRIS `8h5j-fqxa` -> `bnx9-e6tj` -> `636b-3b5g`), and Speculation Watch List hits (`adax-9mit`). Staten Island instruments are with the Richmond County Clerk, not ACRIS. |
+| `true_owner` | `house_number`, `street`, `borough` (all required), `docs_limit` | Ownership from the property record rather than HPD's filings: the DOF assessment-roll owner (PLUTO `64uk-42ks`), recent recorded deeds/mortgages with named parties (ACRIS `8h5j-fqxa` -> `bnx9-e6tj` -> `636b-3b5g`), and Speculation Watch List hits (`adax-9mit`). Always surfaces `latest_deed` (the newest DEED-family instrument, chased specifically even when the newest documents are other paperwork). Staten Island instruments are with the Richmond County Clerk, not ACRIS. |
 | `dob_building` | `house_number`, `street`, `borough` (all required), `limit` | Department of Buildings records — a different agency from HPD: DOB violations (`3h2n-5cm9`, by-category summary) and DOB complaints (`eabe-havv`, by-status summary). DOB dates arrive in the agency's raw formats. |
 | `building_311` | `address`, `borough` (both required), `complaint_type`, `since`, `limit` | 311 service requests (`erm2-nwe9`) for an address, defaulting to the heat/hot-water types; pass `complaint_type` for any other. Newest-first with a by-status summary. Uses the dataset's full-text index (`$q`) so the 40M-row table answers fast. |
 
@@ -38,6 +38,16 @@ Dataset ids and column notes:
 | HPD Registration Contacts | `feu5-w2e2` | Owner / agent / officer names. Joined by `registrationid`. |
 | HPD Housing Litigations | `59kj-x8nc` | Address columns `housenumber` / `streetname` / `boroid` (numeric 1 to 5, no text borough). Has `respondent`, `penalty`, `findingofharassment`. |
 | Evictions | `6z8x-wfk4` | Marshal-executed only. Combined `eviction_address` string plus `borough`. |
+| DOB Violations | `3h2n-5cm9` | `boro` is a NUMERIC-as-text code 1-5 (plus legacy junk rows). Dates in DOB's raw formats (often `YYYYMMDD`). |
+| DOB Complaints | `eabe-havv` | NO borough column at all; the `community_board` first digit is the borough code (filtered via `starts_with`). |
+| 311 Service Requests | `erm2-nwe9` | ~40M rows; a bare `LIKE` over `incident_address` full-scans and times out, so the address rides the indexed `$q` full-text parameter with the `LIKE` as refiner. Borough is uppercase text. |
+| Bedbug Filings | `wz6d-d3jb` | Borough uppercase text. Infested / eradicated / re-infested unit counts per filing period. |
+| AEP (Alternative Enforcement) | `hcir-3275` | `boro` is Title Case text ("Bronx"); matched case-insensitively. |
+| Vacate Orders | `tb8q-a3ar` | `boro_short_name` is the 2-letter code (BX/BK/MN/QN/SI). |
+| HWO Emergency-Repair Charges | `sbnd-xujn` | Handyman Work Orders billed to landlords. Borough uppercase text. |
+| PLUTO Tax Lots | `64uk-42ks` | `borough` is the 2-letter code. Carries the DOF assessment-roll `ownername`, `bbl`, block/lot, units, year built. |
+| ACRIS Legals / Master / Parties | `8h5j-fqxa` / `bnx9-e6tj` / `636b-3b5g` | The recorded-instrument chain: borough/block/lot -> document ids -> doc type/date/amount -> named parties. Text-typed columns, quoted comparisons. Staten Island is NOT in ACRIS (Richmond County Clerk). |
+| Speculation Watch List | `adax-9mit` | Qualifying flip-risk purchases; matched by block/lot with the row's own `bbl` confirming borough. |
 
 ### Field map (raw column to normalized output)
 
@@ -50,6 +60,9 @@ Dataset ids and column notes:
 | `housenumber` + `streetname`, `boro`, `bin`, `lastregistrationdate` | `building_address`, `borough`, `bin`, `last_registration_date` (+ `matched_contacts`) | landlord_portfolio |
 | `litigationid`, `casetype`, `casestatus`, `penalty`, `respondent` | `litigation_id`, `case_type`, `case_status`, `penalty`, `respondent` | landlord_litigation |
 | `court_index_number`, `eviction_address`, `executed_date`, `marshal_*` | `court_index_number`, `eviction_address`, `executed_date`, `marshal_name` | eviction_lookup |
+| `ownername`, `bbl`, `block`/`lot`, `unitsres`, `yearbuilt` | `owner_name`, `bbl`, `block`/`lot`, `residential_units`, `year_built` | true_owner (PLUTO) |
+| `doc_type`, `document_amt`, `recorded_datetime`, parties by `party_type` | `doc_type`, `document_amount`, `recorded_datetime`, `party_1`/`party_2`/`party_3` | true_owner (ACRIS) |
+| `complaint_type`, `descriptor`, `resolution_description`, `created_date` | same names | building_311 |
 
 ## Install
 
@@ -175,7 +188,7 @@ A single-building LLC like this one is itself the common NYC pattern; searching 
 There is no geocoding here. Address matching is literal against how HPD stores addresses:
 
 - Street names are stored uppercase. The server uppercases and trims your `street` input and matches it as a substring (`upper(streetname) like '%YOUR STREET%'`). So `Sedgwick`, `sedgwick avenue`, and `SEDGWICK AVE` all match `SEDGWICK AVENUE`, but a very short input can over-match (`5 St` would also hit `125 St`). Pass the fuller street name when you can.
-- House number is matched exactly (uppercased), so `1520` is not `1516-1520`. Multi-address buildings can register under a range.
+- House number is matched exactly (uppercased) first — and on a zero, the per-building tools automatically retry spelling variants: `120 15` and `12015` are re-tried as `120-15` (Queens numbers get the digit-split form), and the response's `note` names every spelling tried, so a hyphenation zero never silently reads as a clean building. Multi-address buildings can still register under a range (`1516-1520`).
 - Borough disambiguates same-numbered streets across boroughs, so it is required for the building tools. Litigations store a numeric borough code; evictions mix borough and county spellings (Brooklyn and Kings, Manhattan and New York, Staten Island and Richmond), and the borough filter expands to all of them.
 - `landlord_portfolio` matches names the same way: uppercase substring against `corporationname`, `firstname`, `lastname`, and the `firstname || ' ' || lastname` concatenation (so a pasted `person_name` from `who_owns` works). LIKE wildcards (`%`, `_`) in your input are escaped. Pass the fullest name you have; a short fragment like `SMITH` or `LLC` over-matches, and the response says how many contact records matched before any cap.
 - `who_owns`, `landlord_portfolio`, `landlord_litigation`, and the datasets themselves reflect HPD filings, which can lag reality. Confirm anything you intend to act on (for example a name to serve) before relying on it.
