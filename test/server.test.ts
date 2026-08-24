@@ -76,6 +76,11 @@ const REGISTRATION_ROW = {
   lastregistrationdate: "2025-09-05T00:00:00.000",
   registrationenddate: "2026-09-01T00:00:00.000",
 };
+// Real column shapes, synthetic people. HPD registration contacts are public
+// record, but there is no reason to ship a real person's name inside a published
+// package, and the assertions below test grouping and the SoQL name
+// concatenation rather than any particular name. The corporate entity stays
+// because it matches the worked example in the README.
 const CONTACT_ROWS = [
   {
     registrationcontactid: "22172903",
@@ -93,8 +98,8 @@ const CONTACT_ROWS = [
     registrationid: "221729",
     type: "Agent",
     corporationname: "M H R MANAGEMENT INC",
-    firstname: "JOHN",
-    lastname: "WARREN",
+    firstname: "DANA",
+    lastname: "REYES",
     businesshousenumber: "43-55",
     businessstreetname: "11TH STREET",
     businesscity: "LIC",
@@ -105,8 +110,8 @@ const CONTACT_ROWS = [
     registrationcontactid: "22172913",
     registrationid: "221729",
     type: "SiteManager",
-    firstname: "ANDRE",
-    lastname: "PENNYE",
+    firstname: "MARCO",
+    lastname: "OKONJO",
   },
 ];
 
@@ -529,7 +534,7 @@ describe("who_owns", () => {
     expect(body.contacts).toHaveLength(3);
     expect(Object.keys(body.contacts_by_type).sort()).toEqual(["Agent", "CorporateOwner", "SiteManager"]);
     expect(body.contacts_by_type.CorporateOwner[0].organization).toBe("WFHA 1520 SEDGWICK LP");
-    expect(body.contacts_by_type.Agent[0].person_name).toBe("JOHN WARREN");
+    expect(body.contacts_by_type.Agent[0].person_name).toBe("DANA REYES");
     expect(body.contacts_by_type.CorporateOwner[0].business_address).toBe("43-55 11TH STREET, LIC NY 11101");
 
     // Contacts fetched via IN() on the numeric registrationid.
@@ -595,12 +600,12 @@ describe("landlord_portfolio", () => {
 
   it("matches a full person name via the first/last concatenation", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "1" }]));
-    fetchMock.mockResolvedValueOnce(jsonResponse([CONTACT_ROWS[1]])); // Agent JOHN WARREN @ 221729
+    fetchMock.mockResolvedValueOnce(jsonResponse([CONTACT_ROWS[1]])); // Agent DANA REYES @ 221729
     fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
-    const body = payload(await call("landlord_portfolio", { name: "John Warren" }));
-    expect(whereOf(0)).toContain("upper(firstname || ' ' || lastname) like '%JOHN WARREN%'");
+    const body = payload(await call("landlord_portfolio", { name: "Dana Reyes" }));
+    expect(whereOf(0)).toContain("upper(firstname || ' ' || lastname) like '%DANA REYES%'");
     expect(body.found).toBe(true);
-    expect(body.buildings[0].matched_contacts[0].person_name).toBe("JOHN WARREN");
+    expect(body.buildings[0].matched_contacts[0].person_name).toBe("DANA REYES");
     expect(body.buildings[0].matched_contacts[0].type).toBe("Agent");
   });
 
@@ -610,8 +615,8 @@ describe("landlord_portfolio", () => {
       registrationid: "221729",
       type: "Officer",
       corporationname: "WFHA 1520 SEDGWICK LP",
-      firstname: "ANDRE",
-      lastname: "PENNYE",
+      firstname: "MARCO",
+      lastname: "OKONJO",
     };
     fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "2" }]));
     fetchMock.mockResolvedValueOnce(jsonResponse([PORTFOLIO_CONTACT_MATCHES[0], officerRow]));

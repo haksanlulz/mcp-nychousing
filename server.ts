@@ -841,7 +841,7 @@ const TOOLS: Tool[] = [
           type: "string",
           description:
             'Owner / corporation / officer / agent name to match, e.g. "WFHA 1520 SEDGWICK LP" or ' +
-            '"JOHN WARREN" (case-insensitive substring against HPD registration-contact names; ' +
+            '"DANA REYES" (case-insensitive substring against HPD registration-contact names; ' +
             "pass the fullest name you have, short fragments over-match).",
         },
         borough: { type: "string", description: `Optional filter: only buildings in this borough. ${BOROUGH_DESC}` },
