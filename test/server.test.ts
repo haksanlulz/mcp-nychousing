@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createServer, __test } from "../server.js";
+import { createServer, __test, clearSodaCache } from "../server.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures: real NYC Open Data (SODA) row shapes. Detail/list and aggregate
@@ -269,6 +269,8 @@ async function call(name: string, args: Record<string, unknown>) {
 function payload(result: any) {
   return JSON.parse(result.content[0].text);
 }
+
+beforeEach(() => clearSodaCache());
 
 beforeEach(async () => {
   fetchMock = vi.fn();
@@ -828,6 +830,11 @@ describe("app token + error handling", () => {
     await call("eviction_lookup", { court_index_number: "123456/24" });
     expect(lastInit().headers["X-App-Token"]).toBeUndefined();
 
+    // Same query again, so the cache would legitimately serve it and no second
+    // request would go out. The token changes Socrata's rate limit, not its
+    // answers, so caching across that boundary is correct -- this test is about
+    // the header, so it opts out of the cache rather than weakening it.
+    clearSodaCache();
     process.env.NYC_APP_TOKEN = "tok_abc";
     fetchMock.mockResolvedValueOnce(jsonResponse([EVICTION_ROW]));
     await call("eviction_lookup", { court_index_number: "123456/24" });
@@ -1168,5 +1175,36 @@ describe("ux fixes 1.1.1", () => {
     // The deed-chase where clause filters the doc family server-side.
     const deedCall = fetchMock.mock.calls.find((c: unknown[]) => String((c[0] as URL).searchParams.get("$where") ?? "").includes("doc_type like 'DEED%'"));
     expect(deedCall).toBeDefined();
+  });
+});
+
+describe("response cache", () => {
+  // HPD refreshes its extracts every 8 hours, so a repeat query inside that
+  // window cannot have a different answer. These pin the two properties that
+  // make the cache safe rather than merely fast.
+  it("serves a repeated query without a second request", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([EVICTION_ROW]));
+    await call("eviction_lookup", { court_index_number: "123456/24" });
+    await call("eviction_lookup", { court_index_number: "123456/24" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats different params as different keys", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([EVICTION_ROW]));
+    await call("eviction_lookup", { court_index_number: "123456/24" });
+    await call("eviction_lookup", { court_index_number: "999999/24" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not cache a failure, so a wobble is not pinned for the process", async () => {
+    fetchMock.mockResolvedValue(textResponse("boom", { ok: false, status: 500 }));
+    const bad: any = await call("eviction_lookup", { court_index_number: "123456/24" });
+    expect(bad.isError).toBe(true);
+    const callsAfterFailure = fetchMock.mock.calls.length;
+
+    fetchMock.mockResolvedValue(jsonResponse([EVICTION_ROW]));
+    const good: any = await call("eviction_lookup", { court_index_number: "123456/24" });
+    expect(good.isError).toBeFalsy();
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFailure);
   });
 });

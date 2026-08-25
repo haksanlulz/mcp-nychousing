@@ -190,8 +190,60 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   throw last;
 }
 
+// HPD refreshes its Open Data extracts every 8 hours (operator-stated
+// 2026-08-24), so a repeat query inside that window is asking a question whose
+// answer cannot have moved. TTL is matched to that cadence rather than guessed.
+//
+// ⚠️ Worst case this serves data up to ~8h behind the latest extract: an entry
+// written just before a refresh lives until just before the one after. That is
+// one cycle, which is the honest bound of any TTL cache against a periodic
+// source. Set SODA_CACHE_TTL_MS=0 to disable if a caller needs the freshest
+// possible read.
+//
+// In memory only, and only successful reads: an MCP server is a short-lived
+// child process, and caching an error would pin a transient failure for the
+// life of it.
+const CACHE_TTL_MS = Number(process.env.SODA_CACHE_TTL_MS ?? 8 * 60 * 60 * 1000);
+const CACHE_MAX = Number(process.env.SODA_CACHE_MAX ?? 300);
+const cache = new Map<string, { at: number; rows: Row[] }>();
+
+function cacheGet(key: string): Row[] | undefined {
+  if (CACHE_TTL_MS <= 0) return undefined;
+  const hit = cache.get(key);
+  if (!hit) return undefined;
+  if (Date.now() - hit.at > CACHE_TTL_MS) {
+    cache.delete(key);
+    return undefined;
+  }
+  // re-insert to move the key to the end of Map order, making eviction LRU
+  cache.delete(key);
+  cache.set(key, hit);
+  return hit.rows;
+}
+
+function cacheSet(key: string, rows: Row[]): void {
+  if (CACHE_TTL_MS <= 0) return;
+  cache.set(key, { at: Date.now(), rows });
+  while (cache.size > CACHE_MAX) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
+
+/** Exported for tests: a cache that cannot be cleared makes every later test
+ *  depend on the order of the ones before it. */
+export function clearSodaCache(): void {
+  cache.clear();
+}
+
 async function sodaGet(dataset: string, params: Record<string, QueryValue> = {}): Promise<Row[]> {
-  return withRetry(() => sodaGetOnce(dataset, params));
+  const key = `${dataset}?${JSON.stringify(params)}`;
+  const hit = cacheGet(key);
+  if (hit) return hit;
+  const rows = await withRetry(() => sodaGetOnce(dataset, params));
+  cacheSet(key, rows);
+  return rows;
 }
 
 async function sodaGetOnce(dataset: string, params: Record<string, QueryValue> = {}): Promise<Row[]> {
