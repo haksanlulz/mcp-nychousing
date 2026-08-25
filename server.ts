@@ -145,7 +145,56 @@ type QueryValue = string | number | undefined | null;
  * Undefined / null / empty params are omitted. SODA answers list and aggregate
  * queries with a JSON array; errors come back as `{ error: true, message }`.
  */
+// Socrata is a shared public endpoint, so a 429 or a 5xx is a "come back", not a
+// verdict. Ported from mcp-housing.
+//
+// Retried: 429, 5xx, and transport errors. NOT retried: other 4xx (a malformed
+// SoQL answers the same however often it is asked) and a non-JSON body.
+//
+// ⚑ The non-JSON call is a genuine judgment: an HTML interstitial during an
+// upstream wobble IS transient and would benefit from a retry, while a rejected
+// app token is not and would not. Treated as permanent for consistency with the
+// sibling servers and because not-retrying is the conservative direction; revisit
+// if interstitials are ever observed in practice.
+class HttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+class PermanentError extends Error {}
+
+const HTTP_ATTEMPTS = Number(process.env.SODA_HTTP_ATTEMPTS ?? 3);
+const RETRY_BACKOFF_MS = [500, 2000];
+const RETRY_DEADLINE_MS = 40_000;
+
+function isRetryable(e: unknown): boolean {
+  if (e instanceof PermanentError) return false;
+  if (e instanceof HttpError) return e.status === 429 || e.status >= 500;
+  return true; // transport error or abort
+}
+
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  const started = Date.now();
+  let last: unknown;
+  for (let attempt = 0; attempt < HTTP_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      last = e;
+      if (attempt === HTTP_ATTEMPTS - 1 || !isRetryable(e)) break;
+      const backoff = RETRY_BACKOFF_MS[attempt] ?? 2000;
+      if (Date.now() - started + backoff + REQUEST_TIMEOUT_MS > RETRY_DEADLINE_MS) break;
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+  throw last;
+}
+
 async function sodaGet(dataset: string, params: Record<string, QueryValue> = {}): Promise<Row[]> {
+  return withRetry(() => sodaGetOnce(dataset, params));
+}
+
+async function sodaGetOnce(dataset: string, params: Record<string, QueryValue> = {}): Promise<Row[]> {
   const url = new URL(`${NYC_API}/${dataset}.json`);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
@@ -169,7 +218,7 @@ async function sodaGet(dataset: string, params: Record<string, QueryValue> = {})
       } catch {
         /* leave detail as the raw text slice */
       }
-      throw new Error(`NYC Open Data request failed (HTTP ${res.status}): ${detail}`);
+      throw new HttpError(`NYC Open Data request failed (HTTP ${res.status}): ${detail}`, res.status);
     }
 
     let json: unknown;
@@ -177,7 +226,7 @@ async function sodaGet(dataset: string, params: Record<string, QueryValue> = {})
       json = JSON.parse(text);
     } catch {
       // HTML error pages / proxy interstitials arrive as non-JSON with a 200.
-      throw new Error(`NYC Open Data returned a non-JSON response: ${text.slice(0, 300).trim()}`);
+      throw new PermanentError(`NYC Open Data returned a non-JSON response: ${text.slice(0, 300).trim()}`);
     }
 
     if (Array.isArray(json)) return json as Row[];

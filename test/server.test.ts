@@ -843,14 +843,34 @@ describe("app token + error handling", () => {
     expect(lastInit().headers["User-Agent"]).toMatch(/^mcp-nychousing\/\d/);
   });
 
-  it("surfaces an HTTP 500 (with the SODA message) as isError", async () => {
-    fetchMock.mockResolvedValueOnce(
+  it("surfaces an HTTP 500 (with the SODA message) as isError, after exhausting retries", async () => {
+    // A 5xx is retried (see withRetry), so the mock must answer every attempt.
+    fetchMock.mockResolvedValue(
       textResponse(JSON.stringify({ error: true, message: "boom" }), { ok: false, status: 500 }),
     );
     const res: any = await call("eviction_lookup", { borough: "Bronx" });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain("500");
     expect(res.content[0].text).toContain("boom");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("does NOT retry a 4xx: a malformed query answers the same every time", async () => {
+    fetchMock.mockResolvedValue(
+      textResponse(JSON.stringify({ error: true, message: "bad SoQL" }), { ok: false, status: 400 }),
+    );
+    const res: any = await call("eviction_lookup", { borough: "Bronx" });
+    expect(res.isError).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a 429, since that one means slow down", async () => {
+    fetchMock.mockResolvedValue(
+      textResponse(JSON.stringify({ error: true, message: "throttled" }), { ok: false, status: 429 }),
+    );
+    const res: any = await call("eviction_lookup", { borough: "Bronx" });
+    expect(res.isError).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("surfaces a non-JSON (HTML) response as isError", async () => {
