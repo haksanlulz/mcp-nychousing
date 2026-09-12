@@ -189,13 +189,30 @@ There is no geocoding here. Address matching is literal against how HPD stores a
 - `landlord_portfolio` matches names the same way: uppercase substring against `corporationname`, `firstname`, `lastname`, and the `firstname || ' ' || lastname` concatenation (so a pasted `person_name` from `who_owns` works). LIKE wildcards (`%`, `_`) in your input are escaped. Pass the fullest name you have; a short fragment like `SMITH` or `LLC` over-matches, and the response says how many contact records matched before any cap.
 - `who_owns`, `landlord_portfolio`, `landlord_litigation`, and the datasets themselves reflect HPD filings, which can lag reality. Confirm anything you intend to act on (for example a name to serve) before relying on it.
 
-## Develop
+## Testing
 
 ```
-npm test         # vitest, fetch mocked (no network)
+npm test         # vitest, fetch mocked (no network); 67 tests in 2 files
 npm run smoke    # one live call per tool against SODA (keyless, no setup)
 npm run typecheck
+npm run verify:pack
 ```
+
+`npm test` is the offline tier: `test/server.test.ts` stubs `globalThis.fetch` and drives every tool through an in-memory MCP client; `test/no-http-stack.test.ts` reads the source and pins that only the stdio transport is imported. `npm run smoke` is the live tier (real SODA calls, not run in CI). There are no test markers; the split is the two scripts.
+
+Counts, measured 2026-09-11:
+
+```
+find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2050 = 2058 app LOC (smoke.ts 139 is the live harness)
+find test -name '*.ts' | xargs wc -l                                                                           # 1274 test LOC
+npm test                                                                                                       # Tests 67 passed (67)
+```
+
+What the tests cover, by layer: SoQL query construction (where clauses, LIKE escaping, borough aliases, Queens hyphenated house numbers, date validation) is asserted on the URL the mocked fetch receives. Tool responses (summaries, normalized rows, `found`/`note` fields, isError text) are asserted on the parsed payload. Transport behavior (app token and User-Agent headers, 5xx/429 retry counts, 4xx no-retry, non-JSON bodies, response cache hit/miss, IN() chunking at 100 ids) is asserted on call counts and request init.
+
+Mutation probe, 2026-09-11: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. One test failed, `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3); the other 66 passed. Source restored after the run.
+
+Wiring assertions audited the same day: 16 `toHaveBeenCalled*` sites, all kept. Fourteen sit beside a payload or URL assertion on the same response; the two response-cache tests (repeat query = one fetch, different params = two fetches) assert the fetch count alone, because the count is the whole contract there. Policy: assert behavior and payloads, never that a function was merely called.
 
 ## AI assistance
 
