@@ -33,26 +33,33 @@ import { fileURLToPath } from "node:url";
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
 const manifest = JSON.parse(readFileSync(join(repo, "manifest.json"), "utf8"));
+// A failure THROWS, and is reported by the catch below. process.exit()
+// terminates synchronously and skips pending finally blocks, so the old
+// version left every failing run with the spawned child unkilled and the
+// staging tree — a full production node_modules plus the packed bundle —
+// still on disk, in the one code path whose whole job is to report a defect.
+class ProbeFailure extends Error {}
 const fail = (m) => {
-  console.error(`FAIL: ${m}`);
-  process.exit(1);
+  throw new ProbeFailure(m);
 };
 const ok = (m) => console.log(`  ok  ${m}`);
 
 console.log(`mcpb-probe: ${manifest.name}@${manifest.version}`);
 
-if (manifest.version !== pkg.version) fail(`manifest.json ${manifest.version} != package.json ${pkg.version}`);
-ok("manifest version matches the package");
-
-const mcpbCli = join(repo, "node_modules", "@anthropic-ai", "mcpb", "dist", "cli", "cli.js");
-if (!existsSync(mcpbCli)) fail("@anthropic-ai/mcpb is not installed — run npm ci");
-
-const work = mkdtempSync(join(tmpdir(), "mcpbprobe-"));
-const stage = join(work, "stage");
-const unpacked = join(work, "unpacked");
-const bundle = join(work, `${manifest.name}.mcpb`);
+let work;
 let child;
 try {
+  if (manifest.version !== pkg.version) fail(`manifest.json ${manifest.version} != package.json ${pkg.version}`);
+  ok("manifest version matches the package");
+
+  const mcpbCli = join(repo, "node_modules", "@anthropic-ai", "mcpb", "dist", "cli", "cli.js");
+  if (!existsSync(mcpbCli)) fail("@anthropic-ai/mcpb is not installed — run npm ci");
+
+  work = mkdtempSync(join(tmpdir(), "mcpbprobe-"));
+  const stage = join(work, "stage");
+  const unpacked = join(work, "unpacked");
+  const bundle = join(work, `${manifest.name}.mcpb`);
+
   // --- 1. build + stage ----------------------------------------------------
   if (spawnSync("npm", ["run", "build"], { cwd: repo, shell: true }).status !== 0) fail("build");
   cpSync(join(repo, "dist"), join(stage, "dist"), { recursive: true });
@@ -171,6 +178,10 @@ try {
   ok("the manifest's declared tool list matches the server");
 
   console.log("PASS — the bundle installs, starts from its own manifest, and serves its tools.");
+} catch (e) {
+  if (!(e instanceof ProbeFailure)) throw e;
+  console.error(`FAIL: ${e.message}`);
+  process.exitCode = 1;
 } finally {
   try {
     child?.kill();
@@ -179,9 +190,11 @@ try {
   }
   // Teardown is best-effort and must never decide the verdict: an EBUSY on a
   // temp directory is not a failure of the artifact under test.
-  try {
-    rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  } catch {
-    /* leave it to the OS */
+  if (work) {
+    try {
+      rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    } catch {
+      /* leave it to the OS */
+    }
   }
 }
