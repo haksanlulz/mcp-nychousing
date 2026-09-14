@@ -1324,6 +1324,10 @@ describe("true_owner", () => {
 
       expect(String(body.acris_note)).toMatch(/at least 1000/);
       expect(String(body.latest_deed.caveat)).toMatch(/cap|older deed/i);
+      // The caveat describes the READ, not the document. When latest_deed is
+      // picked out of acris_documents it is the same object, so a plain
+      // assignment would publish a caveat field on one list row too.
+      expect(body.acris_documents.some((d: Record<string, unknown>) => "caveat" in d)).toBe(false);
     });
   });
 });

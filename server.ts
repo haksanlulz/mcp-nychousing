@@ -2089,9 +2089,16 @@ async function trueOwner(args: Row): Promise<unknown> {
       // ("who bought this building last"), so a warning that lives only in
       // acris_note is a warning the reader of that field never sees.
       if (latestDeed && docsTruncated) {
-        latestDeed.caveat =
-          `Resolved over the first ${docIds.length} of this lot's recorded documents (the server's ` +
-          "cap); an older deed set may exist beyond it.";
+        // Copied, not mutated: in the else-branch above latestDeed is a
+        // REFERENCE into acrisDocs, so assigning here would also stamp a
+        // caveat field onto one row of the returned document list, where it
+        // reads as a property of that document rather than of the read.
+        latestDeed = {
+          ...latestDeed,
+          caveat:
+            `Resolved over the first ${docIds.length} of this lot's recorded documents (the server's ` +
+            "cap); an older deed set may exist beyond it.",
+        };
       }
     }
   }
