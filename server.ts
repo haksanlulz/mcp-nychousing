@@ -1467,7 +1467,19 @@ async function registrationContacts(
     if (seen) seen.filings = (num(seen.filings) ?? 0) + n;
     else byKey.set(key, { ...normContact(r), filings: n });
   }
-  return { contacts: [...byKey.values()], filings, truncated: rows.length >= CONTACT_IDENTITY_CAP };
+  const truncated = rows.length >= CONTACT_IDENTITY_CAP;
+  if (!truncated) return { contacts: [...byKey.values()], filings, truncated };
+  // Past the cap the grouped page is a SAMPLE of the identities, so its sum is
+  // a sample of the filings — and `filings` is published unqualified, as
+  // who_owns.summary.contact_filings and building_profile.contact_filings, and
+  // spoken in a note ("N filing(s) reduce to M distinct contact(s)"). Same
+  // reasoning as evictions_executed: a display cap must not quietly become the
+  // headline number. One extra request, only on the truncated path.
+  const totalRows = await sodaGet(DATASET.contacts, {
+    $select: "count(1) as n",
+    $where: inNum("registrationid", regIds),
+  });
+  return { contacts: [...byKey.values()], filings: num(totalRows[0]?.n) ?? filings, truncated };
 }
 
 async function whoOwns(args: Row): Promise<unknown> {
@@ -1536,9 +1548,13 @@ async function whoOwns(args: Row): Promise<unknown> {
     );
   }
   if (filings > contacts.length) {
+    // Under truncation the distinct count is the cap, not the registration's
+    // real one, so the reduction is a floor. The filing count is not: it comes
+    // from its own aggregate over the same ids.
     notes.push(
       `HPD files each contact once per building the registration covers, so ${filings} filing(s) ` +
-        `reduce to ${contacts.length} distinct contact(s); each contact's "filings" is its row count.`,
+        `reduce to ${truncated ? "at least " : ""}${contacts.length} distinct contact(s); ` +
+        'each contact\'s "filings" is its row count.',
     );
   }
   notes.push(

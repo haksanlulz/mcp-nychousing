@@ -686,14 +686,25 @@ describe("who_owns", () => {
       { type: "HeadOfficer", firstname: "DAVID", lastname: "MALEK", businesshousenumber: "170", businessstreetname: "E SUNRISE HWY" },
       { type: "SiteManager", firstname: "KEVIN", lastname: "DZAFERI" },
     ];
-    // 435 raw rows: the five identities, each repeated once per building.
-    const RAW_435 = Array.from({ length: 87 }, (_, b) =>
-      IDENTITIES.map((id, i) => ({ registrationcontactid: String(1039100 + i), registrationid: "10391", ...id })),
-    ).flat();
+    // What the server returns for the grouped query: one row per identity,
+    // carrying the 87 filings it stands for. 435 raw rows cannot be the
+    // response shape — the query carries $limit 200 — so the raw path is
+    // exercised separately, under the cap, below.
+    const GROUPED_435 = IDENTITIES.map((id, i) => ({
+      registrationcontactid: String(1039100 + i),
+      registrationid: "10391",
+      ...id,
+      n: "87",
+    }));
+    /** `buildings` raw (ungrouped) rows per identity, the client-side path. */
+    const raw = (buildings: number) =>
+      Array.from({ length: buildings }, () =>
+        IDENTITIES.map((id, i) => ({ registrationcontactid: String(1039100 + i), registrationid: "10391", ...id })),
+      ).flat();
 
     it("reduces 435 filings to 5 distinct contacts and keeps the filing count", async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
-      fetchMock.mockResolvedValueOnce(jsonResponse(RAW_435));
+      fetchMock.mockResolvedValueOnce(jsonResponse(GROUPED_435));
       const body = payload(await call("who_owns", { house_number: "2862", street: "Hylan Boulevard", borough: "Staten Island" }));
 
       expect(body.contacts).toHaveLength(5);
@@ -710,9 +721,20 @@ describe("who_owns", () => {
       expect(body.note).toMatch(/435 filing/);
     });
 
+    // The same reduction with no `n` on the rows: each row is one filing.
+    it("dedupes raw, ungrouped rows too, counting each as one filing", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
+      fetchMock.mockResolvedValueOnce(jsonResponse(raw(30))); // 150 rows, under the cap
+      const body = payload(await call("who_owns", { house_number: "2862", street: "Hylan Boulevard", borough: "Staten Island" }));
+
+      expect(body.contacts).toHaveLength(5);
+      expect(body.summary).toEqual({ contact_filings: 150, distinct_contacts: 5 });
+      expect(body.contacts.every((c: any) => c.filings === 30)).toBe(true);
+    });
+
     it("asks the server for the distinct set, ordered, rather than a bare capped page", async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
-      fetchMock.mockResolvedValueOnce(jsonResponse(RAW_435));
+      fetchMock.mockResolvedValueOnce(jsonResponse(GROUPED_435));
       await call("who_owns", { house_number: "2862", street: "Hylan Boulevard", borough: "Staten Island" });
 
       const p = urlOf(1).searchParams;
@@ -720,9 +742,13 @@ describe("who_owns", () => {
       expect(p.get("$group")).toContain("businesszip"); // the FULL tuple, not name alone
       expect(p.get("$select")).toContain("count(1) as n"); // raw filing count survives the group
       expect(p.get("$order")).toBeTruthy();
+      expect(fetchMock).toHaveBeenCalledTimes(2); // under the cap the page IS the whole set
     });
 
-    it("notes truncation when the distinct-contact cap is reached", async () => {
+    // The grouped page stops at CONTACT_IDENTITY_CAP identities, so summing it
+    // past the cap publishes a partial total under an unqualified name — the
+    // same shape as evictions_executed one function away.
+    it("takes the filing count from its own aggregate once the cap is reached", async () => {
       const many = Array.from({ length: 200 }, (_, i) => ({
         registrationid: "10391",
         type: "Officer",
@@ -732,11 +758,19 @@ describe("who_owns", () => {
       }));
       fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
       fetchMock.mockResolvedValueOnce(jsonResponse(many));
+      fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "9000" }])); // the real filing total
       const body = payload(await call("who_owns", { house_number: "2862", street: "Hylan Boulevard", borough: "Staten Island" }));
 
       expect(body.contacts).toHaveLength(200);
-      expect(body.summary.contact_filings).toBe(600);
+      expect(body.summary.contact_filings).toBe(9000); // NOT 600, the capped page's sum
       expect(body.note).toMatch(/first 200 distinct contacts|more on file/i);
+      // The distinct count IS capped, so the prose reduction is a floor.
+      expect(body.note).toMatch(/at least 200 distinct contact/);
+      // Same ids, no group: the total describes the same registration set.
+      const p = urlOf(2).searchParams;
+      expect(p.get("$select")).toBe("count(1) as n");
+      expect(p.get("$group")).toBeNull();
+      expect(p.get("$where")).toBe(urlOf(1).searchParams.get("$where"));
     });
   });
 
@@ -1643,7 +1677,9 @@ describe("building_profile", () => {
   // Same repetition as who_owns: the profile's contacts call must not ship a
   // building's owner list 87 times over.
   it("dedupes the per-building repetition in its contacts section", async () => {
-    const repeated = Array.from({ length: 87 }, () => CONTACT_ROWS).flat();
+    // The grouped shape the server returns: one row per identity, each
+    // standing for the 87 buildings the registration covers.
+    const repeated = CONTACT_ROWS.map((c) => ({ ...c, n: "87" }));
     fetchMock
       .mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]))
       .mockResolvedValueOnce(jsonResponse(repeated))
