@@ -2,7 +2,11 @@
 
 MCP server for NYC housing data over [NYC Open Data](https://opendata.cityofnewyork.us/) (the Socrata / SODA API). Built for tenant organizers, housing-court legal-aid intake, and Right-to-Counsel orgs: pull a building's HPD violations and complaints, find out who actually owns it two different ways (HPD's registration filings, and the property record itself: the assessment roll, recorded deeds and mortgages, and Speculation Watch List), map everything else registered under that owner or agent's name, check HPD litigation, Department of Buildings records, 311 heat complaints, and marshal-executed evictions — or pull the whole picture in one `building_profile` call.
 
-It wraps seventeen city datasets and normalizes their raw columns (`novdescription`, `violationstatus`, `registrationid`, `court_index_number`, and so on) into documented tool outputs.
+It wraps eighteen city datasets and normalizes their raw columns (`novdescription`, `violationstatus`, `registrationid`, `court_index_number`, and so on) into documented tool outputs. The number is the `DATASET` map in `server.ts`, one row per id in the table below:
+
+```bash
+sed -n '/^const DATASET = {/,/^} as const;/p' server.ts | grep -oE '"[a-z0-9]{4}-[a-z0-9]{4}"' | sort -u | wc -l
+```
 
 ## Tools
 
@@ -14,7 +18,7 @@ It wraps seventeen city datasets and normalizes their raw columns (`novdescripti
 | `landlord_portfolio` | `name` (required), `borough`, `limit` | Reverse of `who_owns`: registration contacts (`feu5-w2e2`) matched by corporation or person name, resolved to every currently registered building (`tesw-yqqr`). Address, borough, zip, BIN, registration dates, and which contact(s) matched, plus contact/registration/building counts. |
 | `landlord_litigation` | `house_number` + `street` + `borough`, and/or `respondent`, plus `case_status`, `limit` | HPD Housing Litigations (`59kj-x8nc`) by building or by respondent name. Case type, open date, status, judgement, harassment finding, penalty, respondent, with a by-status summary. |
 | `eviction_lookup` | `court_index_number`, and/or `address`, and/or `borough`, plus `since`, `limit` | Marshal-executed evictions (`6z8x-wfk4`) by court index number or address/borough. Index number, address, executed date, marshal, residential/commercial flag. |
-| `building_profile` | `house_number`, `street`, `borough` (all required) | One-call profile across nine datasets: registration + contacts, violation counts by class, complaint counts by status, litigation counts by status, executed-eviction count, AEP status (`hcir-3275`), vacate orders (`tb8q-a3ar`), latest bedbug filings (`wz6d-d3jb`), and emergency-repair charge count (`sbnd-xujn`). Start here, then drill down. |
+| `building_profile` | `house_number`, `street`, `borough` (all required) | One-call profile across ten datasets: registration (`tesw-yqqr`) + contacts (`feu5-w2e2`), violation counts by class, complaint counts by status, litigation counts by status, executed-eviction count, AEP status (`hcir-3275`), vacate orders (`tb8q-a3ar`), latest bedbug filings (`wz6d-d3jb`), and emergency-repair charge count (`sbnd-xujn`). Start here, then drill down. |
 | `true_owner` | `house_number`, `street`, `borough` (all required), `docs_limit` | Ownership from the property record rather than HPD's filings: the DOF assessment-roll owner (PLUTO `64uk-42ks`), recent recorded deeds/mortgages with named parties (ACRIS `8h5j-fqxa` -> `bnx9-e6tj` -> `636b-3b5g`), and Speculation Watch List hits (`adax-9mit`). Always surfaces `latest_deed` (the newest DEED-family instrument, chased specifically even when the newest documents are other paperwork). Staten Island instruments are with the Richmond County Clerk, not ACRIS. |
 | `dob_building` | `house_number`, `street`, `borough` (all required), `limit` | Department of Buildings records — a different agency from HPD: DOB violations (`3h2n-5cm9`, by-category summary) and DOB complaints (`eabe-havv`, by-status summary). DOB dates arrive in the agency's raw formats. |
 | `building_311` | `address`, `borough` (both required), `complaint_type`, `since`, `limit` | 311 service requests (`erm2-nwe9`) for an address, defaulting to the heat/hot-water types; pass `complaint_type` for any other. Newest-first with a by-status summary. Uses the dataset's full-text index (`$q`) so the 40M-row table answers fast. |
@@ -46,7 +50,9 @@ Dataset ids and column notes:
 | Vacate Orders | `tb8q-a3ar` | `boro_short_name` is the 2-letter code (BX/BK/MN/QN/SI). |
 | HWO Emergency-Repair Charges | `sbnd-xujn` | Handyman Work Orders billed to landlords. Borough uppercase text. |
 | PLUTO Tax Lots | `64uk-42ks` | `borough` is the 2-letter code. Carries the DOF assessment-roll `ownername`, `bbl`, block/lot, units, year built. |
-| ACRIS Legals / Master / Parties | `8h5j-fqxa` / `bnx9-e6tj` / `636b-3b5g` | The recorded-instrument chain: borough/block/lot -> document ids -> doc type/date/amount -> named parties. Text-typed columns, quoted comparisons. Staten Island is NOT in ACRIS (Richmond County Clerk). |
+| ACRIS Legals | `8h5j-fqxa` | Step 1 of the recorded-instrument chain: borough/block/lot -> document ids. Text-typed columns, quoted comparisons. Carries NO recorded-date column, so recency comes from Master, never from `document_id` (legacy `FT_*` ids sort above every modern one). Staten Island is NOT in ACRIS (Richmond County Clerk). |
+| ACRIS Master | `bnx9-e6tj` | Step 2: document id -> `doc_type`, `recorded_datetime`, `document_amt`. This is the recency key for `latest_deed`. |
+| ACRIS Parties | `636b-3b5g` | Step 3: document id -> named parties. Role semantics vary by doc type (for a deed, party 1 is the seller and party 2 the buyer; for a mortgage, party 1 is the borrower and party 2 the lender). |
 | Speculation Watch List | `adax-9mit` | Qualifying flip-risk purchases; matched by block/lot with the row's own `bbl` confirming borough. |
 
 ### Field map (raw column to normalized output)
@@ -193,6 +199,34 @@ Then take a name from `who_owns` output and reverse it. Call `landlord_portfolio
 
 A single-building LLC like this one is itself the common NYC pattern; searching an officer or agent person name from the same `who_owns` output is how you connect the buildings the per-building LLC names hide.
 
+## Worked example
+
+A tenant comes to an intake desk about 1520 Sedgwick Avenue in the Bronx. You need the building's condition record, a name to serve, and whether the landlord holds other buildings — before the appointment ends.
+
+Four calls, in this order. Figures below are from a live run on 2026-09-14 and move as the city updates the data.
+
+**1. `building_profile`** — `{ "house_number": "1520", "street": "Sedgwick Avenue", "borough": "Bronx" }`
+
+The one-call overview across ten datasets. Returned: registered with HPD; 1,038 violations (203 class A, 551 B, 281 C, 3 I); 2,831 complaints, all closed; 32 HPD litigations, 31 closed and 1 pending; 13 marshal-executed evictions; 1 vacate order; 3 bedbug filings; 7 emergency-repair charges; not in AEP. The eviction count arrives with the stored address spellings it matched (`1520 SEDGWICK AVE` once, `1520 SEDGWICK AVENUE` twelve times), so you can see what the count is made of.
+
+**2. `who_owns`** — same three arguments
+
+Registration `221729`, expiring 2026-09-01, with five distinct contacts: a corporate owner (`WFHA 1520 SEDGWICK LP`), an agent (`M H R MANAGEGEMENT INC` — HPD's own spelling), a head officer, an officer, and a site manager. Owner and agent share a business address at 43-55 11th Street, Long Island City. That address, and the agent, are the two threads worth pulling.
+
+**3. `landlord_portfolio`** — `{ "name": "M H R MANAGE" }`
+
+A fragment, not the full string, because the stored spelling is misspelled and a second filing may spell it correctly. Two contact records, two registrations, two buildings: 1520 Sedgwick Avenue in the Bronx and 588 Rogers Avenue in Brooklyn — different LLCs, same agent.
+
+**4. `true_owner`** — same three arguments as step 1
+
+The property record rather than HPD's filings. The assessment roll names `1520 SEDGWICK HOUSING DEVELOPMENT FUND C ORPORATION` (the spacing is DOF's), on BBL 2028800017, 101 residential units, built 1969. The most recent deed is document `2012070800054004`, recorded 2012-07-19, from `WFHA 1520 SEDGWICK, L.P.` to the HDFC.
+
+### What goes in the intake note
+
+> 1520 Sedgwick Avenue, Bronx (BBL 2028800017) is a 101-unit building from 1969, currently registered with HPD under registration 221729, which expires 2026-09-01. Its HPD record shows 1,038 violations to date, 281 of them class C (immediately hazardous), plus a vacate order and three bedbug filings. The building carries 32 HPD housing-litigation records, one still pending (the dataset holds HPD-initiated cases and tenant actions together). Thirteen evictions have been executed there by a marshal. The registered owner is WFHA 1520 Sedgwick LP and the registered managing agent is M H R Management Inc, both at 43-55 11th Street, Long Island City; the same agent is also on file for 588 Rogers Avenue in Brooklyn, under a different LLC. The recorded deed is older than the registration: the lot was conveyed in 2012 to 1520 Sedgwick Housing Development Fund Corporation. These are agency records, not findings: HPD registration is self-reported and can lag, violation counts are inspection findings rather than current conditions, and the litigation counts are HPD workflow statuses, not rulings. Confirm the owner and agent before serving.
+
+Every response carries a `record_scope` line saying what that dataset does and does not establish; the last two sentences above are that line, in plain language.
+
 ## Address matching
 
 There is no geocoding here. Address matching is literal against how HPD stores addresses:
@@ -210,23 +244,26 @@ npm test         # vitest, fetch mocked (no network); 67 tests in 2 files
 npm run smoke    # one live call per tool against SODA (keyless, no setup)
 npm run typecheck
 npm run verify:pack
+npm run verify:mcpb
 ```
 
 `npm test` is the offline tier: `test/server.test.ts` stubs `globalThis.fetch` and drives every tool through an in-memory MCP client; `test/no-http-stack.test.ts` reads the source and pins that only the stdio transport is imported. `npm run smoke` is the live tier (real SODA calls, not run in CI). There are no test markers; the split is the two scripts.
 
-Counts, measured 2026-09-11:
+Counts, measured 2026-09-14:
 
 ```
-find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2050 = 2058 app LOC (smoke.ts 139 is the live harness)
-find test -name '*.ts' | xargs wc -l                                                                           # 1274 test LOC
-npm test                                                                                                       # Tests 67 passed (67)
+find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2430 = 2438 app LOC (smoke.ts 139 is the live harness)
+find test -name '*.ts' | xargs wc -l                                                                           # 1767 test LOC
+npm test                                                                                                       # Tests 92 passed (92)
 ```
 
 What the tests cover, by layer: SoQL query construction (where clauses, LIKE escaping, borough aliases, Queens hyphenated house numbers, date validation) is asserted on the URL the mocked fetch receives. Tool responses (summaries, normalized rows, `found`/`note` fields, isError text) are asserted on the parsed payload. Transport behavior (app token and User-Agent headers, 5xx/429 retry counts, 4xx no-retry, non-JSON bodies, response cache hit/miss, IN() chunking at 100 ids) is asserted on call counts and request init.
 
-Mutation probe, 2026-09-11: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. One test failed, `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3); the other 66 passed. Source restored after the run.
+Mutation probe, re-run 2026-09-14: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. One test failed, `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3); the other 91 passed. Source restored after the run.
 
-Wiring assertions audited the same day: 16 `toHaveBeenCalled*` sites, all kept. Fourteen sit beside a payload or URL assertion on the same response; the two response-cache tests (repeat query = one fetch, different params = two fetches) assert the fetch count alone, because the count is the whole contract there. Policy: assert behavior and payloads, never that a function was merely called.
+Wiring assertions, 2026-09-14: 25 `toHaveBeenCalled*` sites. Most sit beside a payload or URL assertion on the same response; the ones that assert a call count alone do so because the count is the whole contract there — the response cache (repeat query = one fetch, different params = two fetches), the retry cap, and the house-number variant probes (a second spelling is attempted only after the first returns zero). Policy: assert behavior and payloads, never that a function was merely called.
+
+The fetch stub honours `$limit` and `$offset`. A stub that returns every fixture row regardless of the query cannot fail on a paging or cap bug, which is how a portfolio truncation — a chunk capped at its own registration-id count — passed a green suite.
 
 ## AI assistance
 
