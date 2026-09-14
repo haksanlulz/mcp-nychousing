@@ -234,13 +234,14 @@ There is no geocoding here. Address matching is literal against how HPD stores a
 - Street names are stored uppercase. The server uppercases and trims your `street` input and matches it as a substring (`upper(streetname) like '%YOUR STREET%'`). So `Sedgwick`, `sedgwick avenue`, and `SEDGWICK AVE` all match `SEDGWICK AVENUE`, but a very short input can over-match (`5 St` would also hit `125 St`). Pass the fuller street name when you can.
 - House number is matched exactly (uppercased) first — and on a zero, the per-building tools automatically retry spelling variants: `120 15` and `12015` are re-tried as `120-15` (Queens numbers get the digit-split form), and the response's `note` names every spelling tried, so a hyphenation zero never silently reads as a clean building. Multi-address buildings can still register under a range (`1516-1520`).
 - Borough disambiguates same-numbered streets across boroughs, so it is required for the building tools. Litigations store a numeric borough code; evictions mix borough and county spellings (Brooklyn and Kings, Manhattan and New York, Staten Island and Richmond), and the borough filter expands to all of them.
+- Evictions store one free-text address line, often a house-number range with an abbreviated street (`2763-69 SEDGWICK AVE`). `building_profile` anchors your house number on a token boundary so it cannot match inside a longer number, requires the street's distinctive word, and returns `evictions_matched_addresses` — the stored spellings behind the count, with a per-spelling count. `evictions_executed` is its own aggregate over the same filter, so the address list's cap does not cap it.
 - `landlord_portfolio` matches names the same way: uppercase substring against `corporationname`, `firstname`, `lastname`, and the `firstname || ' ' || lastname` concatenation (so a pasted `person_name` from `who_owns` works). LIKE wildcards (`%`, `_`) in your input are escaped. Pass the fullest name you have; a short fragment like `SMITH` or `LLC` over-matches, and the response says how many contact records matched before any cap.
 - `who_owns`, `landlord_portfolio`, `landlord_litigation`, and the datasets themselves reflect HPD filings, which can lag reality. Confirm anything you intend to act on (for example a name to serve) before relying on it.
 
 ## Testing
 
 ```
-npm test         # vitest, fetch mocked (no network); 67 tests in 2 files
+npm test         # vitest, fetch mocked (no network); 97 tests in 2 files
 npm run smoke    # one live call per tool against SODA (keyless, no setup)
 npm run typecheck
 npm run verify:pack
@@ -252,16 +253,16 @@ npm run verify:mcpb
 Counts, measured 2026-09-14:
 
 ```
-find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2430 = 2438 app LOC (smoke.ts 139 is the live harness)
-find test -name '*.ts' | xargs wc -l                                                                           # 1767 test LOC
-npm test                                                                                                       # Tests 92 passed (92)
+find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2467 = 2475 app LOC (smoke.ts 139 is the live harness)
+find test -name '*.ts' | xargs wc -l                                                                           # 1863 test LOC
+npm test                                                                                                       # Tests 97 passed (97)
 ```
 
 What the tests cover, by layer: SoQL query construction (where clauses, LIKE escaping, borough aliases, Queens hyphenated house numbers, date validation) is asserted on the URL the mocked fetch receives. Tool responses (summaries, normalized rows, `found`/`note` fields, isError text) are asserted on the parsed payload. Transport behavior (app token and User-Agent headers, 5xx/429 retry counts, 4xx no-retry, non-JSON bodies, response cache hit/miss, IN() chunking at 100 ids) is asserted on call counts and request init.
 
-Mutation probe, re-run 2026-09-14: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. One test failed, `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3); the other 91 passed. Source restored after the run.
+Mutation probe, re-run 2026-09-14: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. One test failed, `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3); the other 96 passed. Source restored after the run.
 
-Wiring assertions, 2026-09-14: 25 `toHaveBeenCalled*` sites. Most sit beside a payload or URL assertion on the same response; the ones that assert a call count alone do so because the count is the whole contract there — the response cache (repeat query = one fetch, different params = two fetches), the retry cap, and the house-number variant probes (a second spelling is attempted only after the first returns zero). Policy: assert behavior and payloads, never that a function was merely called.
+Wiring assertions, 2026-09-14: 27 `toHaveBeenCalled*` sites. Most sit beside a payload or URL assertion on the same response; the ones that assert a call count alone do so because the count is the whole contract there — the response cache (repeat query = one fetch, different params = two fetches), the retry cap, and the house-number variant probes (a second spelling is attempted only after the first returns zero). Policy: assert behavior and payloads, never that a function was merely called.
 
 The fetch stub honours `$limit` and `$offset`. A stub that returns every fixture row regardless of the query cannot fail on a paging or cap bug, which is how a portfolio truncation — a chunk capped at its own registration-id count — passed a green suite.
 
