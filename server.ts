@@ -376,6 +376,45 @@ function likeCI(col: string, value: string): string {
   return `upper(${col}) like '%${soqlLike(value.toUpperCase())}%'`;
 }
 
+/** `upper(col) like '%a%b%'`: the parts must appear in order, with anything
+ * between them. Each part is wildcard-escaped; only our separators are live. */
+function likeCIParts(col: string, parts: string[]): string {
+  const pattern = parts.map((p) => soqlLike(p.toUpperCase())).join("%");
+  return `upper(${col}) like '%${pattern}%'`;
+}
+
+/** Generic street-type words. The distinctive part of a street name is what is
+ * left once these are stripped off the end; directionals are NOT in the list,
+ * since "E 138 STREET" and "W 138 STREET" are different streets. */
+const STREET_TYPE_WORDS = new Set([
+  "AVENUE", "AVE", "AV",
+  "STREET", "STR", "ST",
+  "ROAD", "RD",
+  "PLACE", "PL",
+  "BOULEVARD", "BLVD",
+  "DRIVE", "DR",
+  "LANE", "LN",
+  "COURT", "CT",
+  "TERRACE", "TER",
+  "PARKWAY", "PKWY",
+  "HIGHWAY", "HWY",
+  "EXPRESSWAY", "EXPY",
+  "CIRCLE", "CIR",
+  "SQUARE", "SQ",
+]);
+
+/**
+ * The distinctive part of a street name: everything before the generic type
+ * word ("SEDGWICK AVENUE" -> "SEDGWICK"). Falls back to the whole input when
+ * stripping would leave nothing, so "AVENUE X" or a bare "AVENUE" survives.
+ */
+function streetDistinctive(street: string): string {
+  const whole = street.toUpperCase().trim();
+  const words = whole.split(/\s+/).filter(Boolean);
+  while (words.length > 1 && STREET_TYPE_WORDS.has(words[words.length - 1])) words.pop();
+  return words.join(" ") || whole;
+}
+
 /** `col >= 'isoDate'` for a floating-timestamp column. isoDate must be trusted. */
 function gteDate(col: string, isoDate: string): string {
   return `${col} >= '${isoDate}'`;
@@ -1237,6 +1276,8 @@ const CONTACT_IDENTITY_COLS = [
 ] as const;
 /** Distinct contact identities read per registration set. */
 const CONTACT_IDENTITY_CAP = 200;
+/** Distinct stored eviction-address spellings reported per building profile. */
+const EVICTION_ADDRESS_CAP = 50;
 
 /**
  * Distinct registration contacts for a set of registration ids, with the raw
@@ -1741,12 +1782,31 @@ async function buildingProfile(args: Row): Promise<unknown> {
   });
   const litigation = tally(litSummary, "casestatus");
 
-  // Marshal-executed evictions (combined-address substring + borough aliases).
+  // Marshal-executed evictions. 6z8x-wfk4 stores ONE free-text address line
+  // that frequently carries a house-number RANGE and an abbreviated or mangled
+  // street, so the composed "<house> <street>" is often not a substring of it:
+  // live 2026-09-14, '%2763 SEDGWICK AVENUE%' in the Bronx returns 0 while the
+  // stored spellings are '2763-69 SEDGWICK AVE' and '2763-69 SEDGWICK AVE NUE'
+  // (a neighbour reads '2755-61 SEDGWICK AVE NUE'). A profile reading zero
+  // there is a clean bill of health on a building with executed evictions.
+  //
+  // Anchor on the house number plus the street's distinctive token instead.
+  // That is deliberately WIDER than an exact match — house 120 also matches
+  // 1120 — which is why the matched address strings are returned beside the
+  // count rather than a bare number the caller cannot audit.
   const evictRows = await sodaGet(DATASET.evictions, {
-    $select: "count(1) as n",
-    $where: whereAnd([likeCI("eviction_address", `${hn} ${street}`), inText("borough", boro.evictionAliases)]),
+    $select: "eviction_address,count(1) as n",
+    $where: whereAnd([
+      likeCIParts("eviction_address", [hn, streetDistinctive(street)]),
+      inText("borough", boro.evictionAliases),
+    ]),
+    $group: "eviction_address",
+    $order: "eviction_address",
+    $limit: EVICTION_ADDRESS_CAP,
   });
-  const evictionsExecuted = num(evictRows[0]?.n) ?? 0;
+  const evictionAddresses = evictRows.map((r) => ({ address: str(r.eviction_address), count: num(r.n) ?? 0 }));
+  const evictionsExecuted = evictionAddresses.reduce((sum, a) => sum + a.count, 0);
+  const evictionsTruncated = evictRows.length >= EVICTION_ADDRESS_CAP;
 
   // AEP (Title Case boro; upper() both sides handles it), vacate (2-letter),
   // bedbug (uppercase), HWO charge count (uppercase).
@@ -1786,6 +1846,11 @@ async function buildingProfile(args: Row): Promise<unknown> {
     hpd_complaints: { total: complaints.total, by_status: complaints.by },
     hpd_litigation: { total: litigation.total, by_status: litigation.by },
     evictions_executed: evictionsExecuted,
+    // The stored spellings that produced the count. The match is house number +
+    // distinctive street token, so a wider hit (120 also matching 1120) is
+    // visible here rather than hidden inside the number.
+    evictions_matched_addresses: evictionAddresses,
+    evictions_addresses_truncated: evictionsTruncated || undefined,
     aep: { in_program_history: aepRows.length > 0, records: aepRows.map(normAep) },
     vacate_orders: vacateRows.map(normVacate),
     bedbug_filings: bedbugRows.map(normBedbug),
@@ -2164,4 +2229,4 @@ export function createServer(): Server {
 }
 
 // Exported for tests only (not part of the MCP surface).
-export const __test = { resolveBorough, soql, soqlLike, likeCI, eqTextCI, inText, tally, houseNumberVariants, contactNameWhere };
+export const __test = { resolveBorough, soql, soqlLike, likeCI, likeCIParts, streetDistinctive, eqTextCI, inText, tally, houseNumberVariants, contactNameWhere };

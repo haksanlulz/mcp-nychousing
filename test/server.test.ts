@@ -1219,6 +1219,58 @@ describe("building_profile", () => {
     expect(String(body.record_scope)).toContain("not that nothing happened");
   });
 
+  // 6z8x-wfk4 stores one free-text address line, often with a house-number
+  // RANGE and an abbreviated or mangled street. Live 2026-09-14:
+  // '%2763 SEDGWICK AVENUE%' in the Bronx returns 0, while the stored spellings
+  // are '2763-69 SEDGWICK AVE' and '2763-69 SEDGWICK AVE NUE'.
+  describe("eviction address matching", () => {
+    it("streetDistinctive strips the generic type word, keeps directionals (unit)", () => {
+      expect(__test.streetDistinctive("Sedgwick Avenue")).toBe("SEDGWICK");
+      expect(__test.streetDistinctive("Queens Boulevard")).toBe("QUEENS");
+      expect(__test.streetDistinctive("E 138 Street")).toBe("E 138");
+      expect(__test.streetDistinctive("Grand Concourse")).toBe("GRAND CONCOURSE");
+      expect(__test.streetDistinctive("Avenue")).toBe("AVENUE"); // stripping to nothing falls back
+    });
+
+    it("likeCIParts joins the parts with a wildcard and escapes each (unit)", () => {
+      expect(__test.likeCIParts("eviction_address", ["2763", "SEDGWICK"])).toBe(
+        "upper(eviction_address) like '%2763%SEDGWICK%'",
+      );
+      expect(__test.likeCIParts("eviction_address", ["100%", "A_B"])).toBe(
+        "upper(eviction_address) like '%100\\%%A\\_B%'",
+      );
+    });
+
+    it("counts an eviction stored as a hyphenated house-number range", async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW])) // registrations
+        .mockResolvedValueOnce(jsonResponse([])) // contacts
+        .mockResolvedValueOnce(jsonResponse([])) // violations
+        .mockResolvedValueOnce(jsonResponse([])) // complaints
+        .mockResolvedValueOnce(jsonResponse([])) // litigation
+        .mockResolvedValueOnce(
+          jsonResponse([
+            { eviction_address: "2763-69 SEDGWICK AVE", n: "5" },
+            { eviction_address: "2763-69 SEDGWICK AVE NUE", n: "4" },
+          ]),
+        )
+        .mockResolvedValue(jsonResponse([]));
+      const body = payload(await call("building_profile", { house_number: "2763", street: "Sedgwick Avenue", borough: "Bronx" }));
+
+      expect(body.evictions_executed).toBe(9);
+      expect(body.evictions_matched_addresses).toEqual([
+        { address: "2763-69 SEDGWICK AVE", count: 5 },
+        { address: "2763-69 SEDGWICK AVE NUE", count: 4 },
+      ]);
+      // Anchored on house number + distinctive token, NOT the composed string
+      // that matches none of the stored spellings.
+      const w = whereOf(5);
+      expect(w).toContain("upper(eviction_address) like '%2763%SEDGWICK%'");
+      expect(w).not.toContain("2763 SEDGWICK AVENUE");
+      expect(w).toContain("borough in ('BRONX')");
+    });
+  });
+
   // Same repetition as who_owns: the profile's contacts call must not ship a
   // building's owner list 87 times over.
   it("dedupes the per-building repetition in its contacts section", async () => {
