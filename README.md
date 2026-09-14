@@ -126,6 +126,17 @@ setx NYC_APP_TOKEN your-token-here      # Windows (new shells)
 
 The token is never logged.
 
+## Environment
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `NYC_APP_TOKEN` | unset | Socrata app token, sent as `X-App-Token`. Optional; raises the rate limit only. A value still containing `${` is treated as unset. |
+| `SODA_HTTP_ATTEMPTS` | `3` | Attempts per outbound request (minimum 1). 429, 5xx and transport errors are retried with backoff; other 4xx and a non-JSON body are not. |
+| `SODA_CACHE_TTL_MS` | `28800000` (8h) | Lifetime of a cached response, matched to HPD's 8-hour extract refresh. `0` disables the cache. In memory, successful reads only. |
+| `SODA_CACHE_MAX` | `300` | Cached responses kept before the least recently used is evicted (minimum 1). |
+
+The three `SODA_*` knobs take an integer. Anything else — a non-integer, a value below the minimum — is refused with one line on stderr naming the variable and the default it fell back to, rather than a throw at import: a typo in an optional knob should not take the server down. A silent `Number("abc")` would not be inert here, since `NaN` disables the retry loop, the cache expiry and the eviction pass in turn.
+
 ## MCP client config
 
 Add an `"env": { "NYC_APP_TOKEN": "your-token-here" }` block only if you want the higher rate limit.
@@ -241,7 +252,7 @@ There is no geocoding here. Address matching is literal against how HPD stores a
 ## Testing
 
 ```
-npm test         # vitest, fetch mocked (no network); 97 tests in 2 files
+npm test         # vitest, fetch mocked (no network); 104 tests in 2 files
 npm run smoke    # one live call per tool against SODA (keyless, no setup)
 npm run typecheck
 npm run verify:pack
@@ -253,9 +264,9 @@ npm run verify:mcpb
 Counts, measured 2026-09-14:
 
 ```
-find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2467 = 2475 app LOC (smoke.ts 139 is the live harness)
-find test -name '*.ts' | xargs wc -l                                                                           # 1863 test LOC
-npm test                                                                                                       # Tests 97 passed (97)
+find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2561 = 2569 app LOC (smoke.ts 139 is the live harness)
+find test -name '*.ts' | xargs wc -l                                                                           # 2040 test LOC
+npm test                                                                                                       # Tests 104 passed (104)
 ```
 
 What the tests cover, by layer: SoQL query construction (where clauses, LIKE escaping, borough aliases, Queens hyphenated house numbers, date validation) is asserted on the URL the mocked fetch receives. Tool responses (summaries, normalized rows, `found`/`note` fields, isError text) are asserted on the parsed payload. Transport behavior (app token and User-Agent headers, 5xx/429 retry counts, 4xx no-retry, non-JSON bodies, response cache hit/miss, IN() chunking at 100 ids) is asserted on call counts and request init.

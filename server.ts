@@ -1185,14 +1185,14 @@ const TOOLS: Tool[] = [
   {
     name: "building_profile",
     description:
-      "One-call condition-and-history profile of a building, aggregating nine city datasets: HPD " +
+      "One-call condition-and-history profile of a building, aggregating ten city datasets: HPD " +
       "registration + contacts (who is on file), violation counts by class, complaint counts by " +
       "status, HPD litigation counts by status, marshal-executed eviction count, Alternative " +
       "Enforcement Program status, vacate orders, the latest bedbug filings, and HPD emergency-repair " +
       "(Handyman Work Order) charge count. START HERE for any 'tell me about this building' " +
       "question, then drill into building_violations / building_complaints / landlord_litigation / " +
       "dob_building / building_311 / true_owner for detail. Give the house number, street, and " +
-      "borough. Makes ~10 sequential city-API calls (a few seconds). Keyless.",
+      "borough. Makes ~11 sequential city-API calls (a few seconds). Keyless.",
     inputSchema: {
       type: "object",
       properties: {
