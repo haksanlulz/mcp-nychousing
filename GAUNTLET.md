@@ -88,6 +88,18 @@ Two shapes recurred and are worth carrying forward. **(a) A cap that cannot be m
 
 `verify:mcpb` was added the same day, and its first version was toothless in the founding shape: it checked that `server.entry_point` existed in the bundle, which passed when pointed at `dist/server.js` — a different real file. It now asserts the entry point is the file `mcp_config` actually launches.
 
+### 2026-09-14 — fix round 1: what the sweep above got wrong
+
+Seven findings, all verified against the tree before acting. **The two worth carrying forward are both cases where a fix introduced a new defect of the same family it closed.**
+
+**(a) A widened match is a wrong answer, not a looser one.** NYCH-3 replaced the composed `"<house> <street>"` with `'%<hn>%<street>%'` and wrote a comment acknowledging the widening ("house 120 also matches 1120") as an accepted cost, paid for by returning the matched address strings. It is not payable that way: `evictions_executed` is a top-level integer a legal-aid reader cites, and an audit array beside it does not undo a wrong number. Live 2026-09-14, `'%20%SEDGWICK%'` in the Bronx returns 13 executed evictions and every one of them belongs to 1520 SEDGWICK AVENUE. The house number is now anchored on a token boundary, verified live in four directions (house 20 → 0, 2763 → the range spellings NYCH-3 exists for, 1520 → 13, 2707 → still catches the A/K/A form).
+
+**(b) A rewritten note can remove the rescue for exactly the callers who still need it.** NYCH-5 gave `building_311` and `dob_building` the house-number variant probe, and rewrote their zero-result notes around it — but the digit-split spelling is generated for Queens only, so outside Queens one spelling is tried and the new note dropped both the tried-spellings line and the old hint about a hyphenated outer-borough number. `dob_building`'s standing note went further and asserted "every spelling variant is probed before a zero is reported", false in the output of the tool printing it. Hyphenated addresses outside Queens are real: live, `incident_address like '__-__ %'` returns 2,253 rows in the Bronx, 725 in Manhattan, 205 in Brooklyn.
+
+Also closed: `evictions_executed` summed the grouped address page and so inherited its 50-spelling display cap — it is now its own `count(1)` over the same filter; `true_owner` stamped the truncation caveat onto `latest_deed` while that was a reference into `acris_documents`, publishing a `caveat` key on one list row; `verify:mcpb` called `process.exit(1)` from inside its `try`, which skips `finally`, so every failing run leaked the staging tree (17 were on disk at ~18 MB each) and left the child unkilled; and it spawned the bundled server with `shell: true`, which on Windows sends `kill()` to `cmd.exe` and leaves arguments unquoted — measured, a path containing a space fails to launch and would read as a bundle defect. Every fix was mutation-probed, the two probe fixes by fault injection against both the old and new file.
+
+Docs: the README's Testing section stated 67 and 92 tests fourteen lines apart; every figure in it is re-measured at this round.
+
 ## Known gaps, ranked by blast radius
 
 Re-ranked 2026-09-14: the README-install gap that sat at rank 1 is resolved — the README documents `npx @haksanlulz/mcp-nychousing` and `verify:pack` proves that path executes.
