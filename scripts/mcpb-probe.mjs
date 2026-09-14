@@ -113,7 +113,13 @@ try {
   for (const [k, v] of Object.entries(shipped.server.mcp_config.env ?? {})) env[k] = subst(v);
   delete env.NYC_APP_TOKEN; // unset, as a user who skipped the optional field leaves it
 
-  child = spawn(shipped.server.mcp_config.command, args, { stdio: ["pipe", "pipe", "pipe"], cwd: unpacked, env, shell: true });
+  // No shell: the command is plain `node` with file-path arguments, so a shell
+  // buys nothing and costs two things on Windows, where this is a local rung as
+  // well as a CI one. child.kill() would signal the intermediate cmd.exe rather
+  // than the node grandchild, and Node does not quote arguments under
+  // shell: true, so a temp path containing a space would break the launch and
+  // be reported as a defect in the bundle. (The npm calls above still need one.)
+  child = spawn(shipped.server.mcp_config.command, args, { stdio: ["pipe", "pipe", "pipe"], cwd: unpacked, env });
   let out = "";
   let err = "";
   child.stdout.on("data", (d) => (out += d));
