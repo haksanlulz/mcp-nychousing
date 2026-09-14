@@ -246,6 +246,20 @@ function textResponse(text: string, init: { ok?: boolean; status?: number } = {}
   return { ok: init.ok ?? true, status: init.status ?? 200, text: async () => text };
 }
 
+/**
+ * A fetch stub that HONOURS $limit and $offset. A stub that hands back every
+ * fixture row regardless of the query cannot fail on a paging or cap bug — the
+ * portfolio truncation (a chunk capped at its own id count) passed a green
+ * suite for exactly that reason.
+ */
+function pagedRows(rows: unknown[]) {
+  return async (url: URL) => {
+    const limit = Number(url.searchParams.get("$limit") ?? rows.length);
+    const offset = Number(url.searchParams.get("$offset") ?? 0);
+    return jsonResponse(rows.slice(offset, offset + limit));
+  };
+}
+
 /** URL passed to the Nth fetch call (0-based). */
 function urlOf(i: number): URL {
   const call = fetchMock.mock.calls[i];
@@ -726,6 +740,76 @@ describe("landlord_portfolio", () => {
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/name is required/i);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // One registrationid can cover a whole multi-building portfolio. Live
+  // 2026-09-14: "2862 HYLAN BOULEVARD CO LLC" is 174 contact rows, exactly one
+  // registrationid (10391), and 87 buildings under it.
+  describe("a registration id covering many buildings", () => {
+    const portfolioRows = Array.from({ length: 87 }, (_, i) => ({
+      ...REGISTRATION_ROW,
+      registrationid: "10391",
+      buildingid: String(758049 + i),
+      housenumber: String(100 + i),
+      streetname: "MALDEN PLACE",
+      boro: "STATEN ISLAND",
+    }));
+    const oneContact = [
+      {
+        registrationcontactid: "1039101",
+        registrationid: "10391",
+        type: "CorporateOwner",
+        corporationname: "2862 HYLAN BOULEVARD CO LLC",
+      },
+    ];
+
+    it("returns every building under the id, not one per id", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "174" }]));
+      fetchMock.mockResolvedValueOnce(jsonResponse(oneContact));
+      fetchMock.mockImplementation(pagedRows(portfolioRows));
+
+      const body = payload(await call("landlord_portfolio", { name: "2862 Hylan Boulevard Co LLC", limit: 100 }));
+      expect(body.summary).toEqual({ contact_matches: 174, distinct_registrations: 1, buildings_found: 87 });
+      expect(body.returned).toBe(87);
+      // The id resolved, so nothing may be blamed on a superseded filing.
+      expect(body.note).not.toMatch(/superseded/);
+    });
+
+    it("pages the chunk rather than capping it at the chunk's id count", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "174" }]));
+      fetchMock.mockResolvedValueOnce(jsonResponse(oneContact));
+      fetchMock.mockImplementation(pagedRows(portfolioRows));
+      await call("landlord_portfolio", { name: "2862 Hylan Boulevard Co LLC" });
+
+      const p = urlOf(2).searchParams;
+      expect(p.get("$limit")).toBe("500"); // NOT "1", the chunk's id count
+      expect(p.get("$order")).toBe("registrationid,buildingid"); // $offset paging needs a total order
+      expect(p.get("$offset")).toBeNull(); // first page carries no offset
+    });
+
+    it("keeps paging past a full page", async () => {
+      const many = Array.from({ length: 600 }, (_, i) => ({ ...portfolioRows[0], buildingid: String(900000 + i) }));
+      fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "600" }]));
+      fetchMock.mockResolvedValueOnce(jsonResponse(oneContact));
+      fetchMock.mockImplementation(pagedRows(many));
+      const body = payload(await call("landlord_portfolio", { name: "Mega", limit: 1 }));
+
+      expect(body.summary.buildings_found).toBe(600);
+      expect(urlOf(3).searchParams.get("$offset")).toBe("500");
+      expect(fetchMock).toHaveBeenCalledTimes(4); // count, scan, page 1, page 2 (short)
+    });
+
+    it("says so out loud when the resolution ceiling truncates the portfolio", async () => {
+      const huge = Array.from({ length: 2600 }, (_, i) => ({ ...portfolioRows[0], buildingid: String(900000 + i) }));
+      fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "2600" }]));
+      fetchMock.mockResolvedValueOnce(jsonResponse(oneContact));
+      fetchMock.mockImplementation(pagedRows(huge));
+      const body = payload(await call("landlord_portfolio", { name: "Mega", limit: 1 }));
+
+      expect(body.summary.buildings_found).toBe(2000); // MAX_RESULTS * 4
+      expect(body.note).toMatch(/ceiling|larger than the count/i);
+      expect(body.note).not.toMatch(/superseded/); // an unread chunk is not a superseded filing
+    });
   });
 });
 

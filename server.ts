@@ -93,6 +93,17 @@ const PORTFOLIO_SCAN_CAP = 1000;
 /** Registration ids per IN() chunk when resolving a portfolio to buildings
  * (keeps each query URL well under length limits). */
 const PORTFOLIO_ID_CHUNK = 100;
+/** Rows per page when resolving one registration-id chunk to buildings.
+ *
+ * One registrationid does NOT mean one building: in tesw-yqqr a single
+ * registration routinely covers a whole multi-building portfolio (live
+ * 2026-09-14, registrationid 10391 = 87 rows / 87 distinct buildingids), so a
+ * chunk is paged to a short read rather than capped at the chunk's id count.
+ * Capping at the id count returned 1 of those 87 with no warning. */
+const PORTFOLIO_PAGE_SIZE = MAX_RESULTS;
+/** Hard ceiling on buildings resolved across every chunk. Hitting it emits an
+ * explicit truncation note rather than silently shortening the portfolio. */
+const PORTFOLIO_BUILDING_CAP = MAX_RESULTS * 4;
 
 // ---------------------------------------------------------------------------
 // Auth (optional app token)
@@ -1362,17 +1373,36 @@ async function landlordPortfolio(args: Row): Promise<unknown> {
   // 3. Resolve the ids to current registrations in IN() chunks (URL-length
   //    bound), applying the optional borough filter server-side.
   const buildings: Record<string, unknown>[] = [];
-  for (let i = 0; i < regIds.length; i += PORTFOLIO_ID_CHUNK) {
+  const resolvedRegIds = new Set<number>();
+  let buildingsTruncated = false;
+  chunks: for (let i = 0; i < regIds.length; i += PORTFOLIO_ID_CHUNK) {
+    if (buildings.length >= PORTFOLIO_BUILDING_CAP) {
+      buildingsTruncated = true;
+      break;
+    }
     const chunk = regIds.slice(i, i + PORTFOLIO_ID_CHUNK);
     const conditions = [inNum("registrationid", chunk)];
     if (boro) conditions.push(eqText("boro", boro.text));
-    const rows = await sodaGet(DATASET.registrations, {
-      $where: whereAnd(conditions),
-      $limit: chunk.length,
-    });
-    for (const row of rows) {
-      const id = num(row.registrationid);
-      buildings.push({ ...normRegistration(row), matched_contacts: (id != null && rolesByReg.get(id)) || [] });
+    const where = whereAnd(conditions);
+    // Page until a short read. $order is required for $offset paging to be a
+    // partition of the result set rather than an arbitrary redraw.
+    for (let offset = 0; ; offset += PORTFOLIO_PAGE_SIZE) {
+      const rows = await sodaGet(DATASET.registrations, {
+        $where: where,
+        $order: "registrationid,buildingid",
+        $limit: PORTFOLIO_PAGE_SIZE,
+        $offset: offset || undefined,
+      });
+      for (const row of rows) {
+        const id = num(row.registrationid);
+        if (id != null) resolvedRegIds.add(id);
+        buildings.push({ ...normRegistration(row), matched_contacts: (id != null && rolesByReg.get(id)) || [] });
+      }
+      if (rows.length < PORTFOLIO_PAGE_SIZE) break; // chunk exhausted
+      if (buildings.length >= PORTFOLIO_BUILDING_CAP) {
+        buildingsTruncated = true;
+        break chunks;
+      }
     }
   }
   // Group the portfolio for reading: borough, then address.
@@ -1414,14 +1444,26 @@ async function landlordPortfolio(args: Row): Promise<unknown> {
         "portfolio below may be incomplete. Use a more specific name.",
     );
   }
-  if (boro && buildings.length < regIds.length) {
+  if (buildingsTruncated) {
     notes.push(
-      `${regIds.length} registration(s) matched the name city-wide; ${buildings.length} in ${boro.text} after the borough filter.`,
+      `Stopped resolving at ${buildings.length} buildings (the server's per-search ceiling), so this ` +
+        "portfolio is larger than the count above. Narrow with borough.",
     );
   }
-  if (!boro && buildings.length < regIds.length) {
+  // A shortfall is counted in REGISTRATION IDS that resolved to nothing, not in
+  // buildings: one registration can cover many buildings, so comparing building
+  // count to id count attributes a multi-building portfolio to "superseded
+  // filings" and vice versa. Both notes are suppressed under truncation, where
+  // an id can be unresolved simply because its chunk was never read.
+  const unresolvedRegIds = buildingsTruncated ? 0 : regIds.length - resolvedRegIds.size;
+  if (boro && unresolvedRegIds > 0) {
     notes.push(
-      `${regIds.length - buildings.length} matched registration id(s) have no current registration on file (superseded filings).`,
+      `${regIds.length} registration(s) matched the name city-wide; ${resolvedRegIds.size} in ${boro.text} after the borough filter.`,
+    );
+  }
+  if (!boro && unresolvedRegIds > 0) {
+    notes.push(
+      `${unresolvedRegIds} matched registration id(s) have no current registration on file (superseded filings).`,
     );
   }
   if (shown.length < buildings.length) {
