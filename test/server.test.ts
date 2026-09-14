@@ -557,6 +557,75 @@ describe("who_owns", () => {
     expect(whereOf(1)).toBe("registrationid in (221729)");
   });
 
+  // HPD repeats every registration contact once per building the registration
+  // covers. Live 2026-09-14: registrationid 10391 is 435 contact rows that
+  // reduce to 5 identities, each appearing 87 times; registrationid 911741 is
+  // 8,688 rows and 6 identities.
+  describe("contacts repeated once per building", () => {
+    // Real identity shapes: MICHAEL MALEK is on file TWICE, as Agent at one
+    // business address and as Officer at another. Dedup on the name alone would
+    // merge two genuinely distinct records.
+    const IDENTITIES = [
+      { type: "CorporateOwner", corporationname: "2862 HYLAN BOULEVARD CO LLC", businesshousenumber: "170", businessstreetname: "E SUNRISE HWY" },
+      { type: "Agent", corporationname: "2862 HYLAN BOULEVARD CO LLC", firstname: "MICHAEL", lastname: "MALEK", businesshousenumber: "1497", businessstreetname: "CONEY ISLAND AVENUE" },
+      { type: "Officer", firstname: "MICHAEL", lastname: "MALEK", businesshousenumber: "170", businessstreetname: "E SUNRISE HWY" },
+      { type: "HeadOfficer", firstname: "DAVID", lastname: "MALEK", businesshousenumber: "170", businessstreetname: "E SUNRISE HWY" },
+      { type: "SiteManager", firstname: "KEVIN", lastname: "DZAFERI" },
+    ];
+    // 435 raw rows: the five identities, each repeated once per building.
+    const RAW_435 = Array.from({ length: 87 }, (_, b) =>
+      IDENTITIES.map((id, i) => ({ registrationcontactid: String(1039100 + i), registrationid: "10391", ...id })),
+    ).flat();
+
+    it("reduces 435 filings to 5 distinct contacts and keeps the filing count", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
+      fetchMock.mockResolvedValueOnce(jsonResponse(RAW_435));
+      const body = payload(await call("who_owns", { house_number: "2862", street: "Hylan Boulevard", borough: "Staten Island" }));
+
+      expect(body.contacts).toHaveLength(5);
+      expect(body.summary).toEqual({ contact_filings: 435, distinct_contacts: 5 });
+      // One entry per type, not 87.
+      expect(Object.keys(body.contacts_by_type).sort()).toEqual(["Agent", "CorporateOwner", "HeadOfficer", "Officer", "SiteManager"]);
+      for (const t of Object.keys(body.contacts_by_type)) expect(body.contacts_by_type[t]).toHaveLength(1);
+      // Each surviving contact reports how many filings it stood for.
+      expect(body.contacts.every((c: any) => c.filings === 87)).toBe(true);
+      // The two MICHAEL MALEK records are kept apart by the full tuple.
+      const maleks = body.contacts.filter((c: any) => c.person_name === "MICHAEL MALEK");
+      expect(maleks.map((c: any) => c.type).sort()).toEqual(["Agent", "Officer"]);
+      expect(new Set(maleks.map((c: any) => c.business_address)).size).toBe(2);
+      expect(body.note).toMatch(/435 filing/);
+    });
+
+    it("asks the server for the distinct set, ordered, rather than a bare capped page", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
+      fetchMock.mockResolvedValueOnce(jsonResponse(RAW_435));
+      await call("who_owns", { house_number: "2862", street: "Hylan Boulevard", borough: "Staten Island" });
+
+      const p = urlOf(1).searchParams;
+      expect(p.get("$group")).toContain("corporationname");
+      expect(p.get("$group")).toContain("businesszip"); // the FULL tuple, not name alone
+      expect(p.get("$select")).toContain("count(1) as n"); // raw filing count survives the group
+      expect(p.get("$order")).toBeTruthy();
+    });
+
+    it("notes truncation when the distinct-contact cap is reached", async () => {
+      const many = Array.from({ length: 200 }, (_, i) => ({
+        registrationid: "10391",
+        type: "Officer",
+        firstname: "PERSON",
+        lastname: String(i),
+        n: "3",
+      }));
+      fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]));
+      fetchMock.mockResolvedValueOnce(jsonResponse(many));
+      const body = payload(await call("who_owns", { house_number: "2862", street: "Hylan Boulevard", borough: "Staten Island" }));
+
+      expect(body.contacts).toHaveLength(200);
+      expect(body.summary.contact_filings).toBe(600);
+      expect(body.note).toMatch(/first 200 distinct contacts|more on file/i);
+    });
+  });
+
   it("returns found:false and skips the contacts call when no registration matches", async () => {
     // Queens "9999" probes the literal then the hyphenated "99-99"; both empty,
     // so no contacts call follows (2 registration probes, 0 contact fetches).
@@ -1148,6 +1217,21 @@ describe("building_profile", () => {
     fetchMock.mockResolvedValue(jsonResponse([]));
     const body = payload(await call("building_profile", { house_number: "9", street: "Empty St", borough: "Queens" }));
     expect(String(body.record_scope)).toContain("not that nothing happened");
+  });
+
+  // Same repetition as who_owns: the profile's contacts call must not ship a
+  // building's owner list 87 times over.
+  it("dedupes the per-building repetition in its contacts section", async () => {
+    const repeated = Array.from({ length: 87 }, () => CONTACT_ROWS).flat();
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW]))
+      .mockResolvedValueOnce(jsonResponse(repeated))
+      .mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_profile", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+
+    expect(body.contacts).toHaveLength(3); // 261 filings, 3 identities
+    expect(body.contact_filings).toBe(261);
+    expect(urlOf(1).searchParams.get("$group")).toContain("businesszip");
   });
 });
 

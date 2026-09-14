@@ -1221,6 +1221,71 @@ async function buildingComplaints(args: Row): Promise<unknown> {
   };
 }
 
+/** The columns that together identify one registration contact. */
+const CONTACT_IDENTITY_COLS = [
+  "registrationid",
+  "type",
+  "corporationname",
+  "firstname",
+  "lastname",
+  "businesshousenumber",
+  "businessstreetname",
+  "businessapartment",
+  "businesscity",
+  "businessstate",
+  "businesszip",
+] as const;
+/** Distinct contact identities read per registration set. */
+const CONTACT_IDENTITY_CAP = 200;
+
+/**
+ * Distinct registration contacts for a set of registration ids, with the raw
+ * filing count kept.
+ *
+ * HPD repeats every contact once per building the registration covers, so a
+ * portfolio registration carries hundreds of near-identical rows for a handful
+ * of people (live 2026-09-14: registrationid 10391 = 435 rows, 5 identities,
+ * each repeated 87 times; registrationid 911741 = 8,688 rows, 6 identities).
+ *
+ * The distinct set is computed SERVER-SIDE with $group, because a capped row
+ * read cannot be made safe by ordering: the repeats of one identity are
+ * contiguous under every column the dataset offers — registrationcontactid is
+ * itself repeated once per building — so a cap drops whole identities rather
+ * than thinning them. A plain `$limit: 200` over 8,688 rows could return one
+ * identity and no note.
+ *
+ * Grouping is on the FULL identity tuple, never the name alone: MICHAEL MALEK
+ * is filed on registration 10391 twice, as Agent at one business address and
+ * as Officer at another, and collapsing on name would merge two real records.
+ * The client-side pass repeats the dedup so the function is correct on raw
+ * rows too, and counts a row without `n` as one filing.
+ */
+async function registrationContacts(
+  regIds: number[],
+): Promise<{ contacts: Record<string, unknown>[]; filings: number; truncated: boolean }> {
+  if (!regIds.length) return { contacts: [], filings: 0, truncated: false };
+  const cols = CONTACT_IDENTITY_COLS.join(",");
+  const rows = await sodaGet(DATASET.contacts, {
+    $select: `${cols},count(1) as n`,
+    $where: inNum("registrationid", regIds),
+    $group: cols,
+    $order: "type,corporationname,lastname,firstname",
+    $limit: CONTACT_IDENTITY_CAP,
+  });
+
+  const byKey = new Map<string, Record<string, unknown>>();
+  let filings = 0;
+  for (const r of rows) {
+    const n = num(r.n) ?? 1; // a grouped row carries its count; a raw row is one filing
+    filings += n;
+    const key = CONTACT_IDENTITY_COLS.map((c) => String(r[c] ?? "")).join("|");
+    const seen = byKey.get(key);
+    if (seen) seen.filings = (num(seen.filings) ?? 0) + n;
+    else byKey.set(key, { ...normContact(r), filings: n });
+  }
+  return { contacts: [...byKey.values()], filings, truncated: rows.length >= CONTACT_IDENTITY_CAP };
+}
+
 async function whoOwns(args: Row): Promise<unknown> {
   const houseNumberInput = reqStr(args.house_number, "house_number");
   const street = reqStr(args.street, "street");
@@ -1266,14 +1331,7 @@ async function whoOwns(args: Row): Promise<unknown> {
   const regIds = registrations
     .map((r) => num((r as Row).registration_id))
     .filter((n): n is number => n != null);
-  let contacts: Record<string, unknown>[] = [];
-  if (regIds.length) {
-    const contactRows = await sodaGet(DATASET.contacts, {
-      $where: inNum("registrationid", regIds),
-      $limit: 200,
-    });
-    contacts = contactRows.map(normContact);
-  }
+  const { contacts, filings, truncated } = await registrationContacts(regIds);
 
   // Group by contact type for a quick "who to serve" scan.
   const byType: Record<string, unknown[]> = {};
@@ -1282,14 +1340,32 @@ async function whoOwns(args: Row): Promise<unknown> {
     (byType[t] ??= []).push(c);
   }
 
-  const filingsNote =
-    "Contacts are HPD registration filings (owner/agent/officer of record); confirm before relying on them for service of process.";
+  const notes: string[] = [];
+  if (resolved.matchedVariant) {
+    notes.push(
+      `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}" (NYC outer-borough addresses are stored hyphenated).`,
+    );
+  }
+  if (truncated) {
+    notes.push(
+      `Showing the first ${contacts.length} distinct contacts; this registration has more on file.`,
+    );
+  }
+  if (filings > contacts.length) {
+    notes.push(
+      `HPD files each contact once per building the registration covers, so ${filings} filing(s) ` +
+        `reduce to ${contacts.length} distinct contact(s); each contact's "filings" is its row count.`,
+    );
+  }
+  notes.push(
+    "Contacts are HPD registration filings (owner/agent/officer of record); confirm before relying on them for service of process.",
+  );
+
   return {
     query,
     found: true,
-    note: resolved.matchedVariant
-      ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}" (NYC outer-borough addresses are stored hyphenated). ${filingsNote}`
-      : filingsNote,
+    summary: { contact_filings: filings, distinct_contacts: contacts.length },
+    note: notes.join(" "),
     registrations,
     contacts_by_type: byType,
     contacts,
@@ -1636,13 +1712,10 @@ async function buildingProfile(args: Row): Promise<unknown> {
   const hn = resolved.houseNumber;
   const registrations = resolved.registrations.map(normRegistration);
 
-  // Contacts for the newest registration (who is on file).
-  let contacts: Record<string, unknown>[] = [];
+  // Contacts for the newest registration (who is on file), deduped server-side:
+  // HPD repeats each contact once per building the registration covers.
   const regIds = registrations.map((r) => num((r as Row).registration_id)).filter((n): n is number => n != null);
-  if (regIds.length) {
-    const contactRows = await sodaGet(DATASET.contacts, { $where: inNum("registrationid", regIds.slice(0, 5)), $limit: 100 });
-    contacts = contactRows.map(normContact);
-  }
+  const { contacts, filings: contactFilings, truncated: contactsTruncated } = await registrationContacts(regIds.slice(0, 5));
 
   // HPD violations by class.
   const violSummary = await sodaGet(DATASET.violations, {
@@ -1707,6 +1780,8 @@ async function buildingProfile(args: Row): Promise<unknown> {
     registered_with_hpd: registrations.length > 0,
     registrations,
     contacts,
+    contact_filings: contactFilings,
+    contacts_truncated: contactsTruncated || undefined,
     hpd_violations: { total: violations.total, by_class: violations.by },
     hpd_complaints: { total: complaints.total, by_status: complaints.by },
     hpd_litigation: { total: litigation.total, by_status: litigation.by },
