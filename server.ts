@@ -77,6 +77,36 @@ const DATASET = {
   speculationWatch: "adax-9mit", // Speculation Watch List: qualifying flip-risk purchases
 } as const;
 
+/**
+ * Read an integer environment knob, falling back to the documented default.
+ *
+ * A bad value here is not inert. `Number("abc")` is NaN, and NaN silently
+ * disables whatever it configures — each confirmed by running the code path:
+ *   - SODA_HTTP_ATTEMPTS: `for (a = 0; a < NaN; a++)` never enters, so withRetry
+ *     falls straight to `throw last` with `last` still undefined and the handler
+ *     renders literally "Error: undefined" — with no HTTP request made at all.
+ *   - SODA_CACHE_TTL_MS: `NaN <= 0` is false so the cache stays on, and
+ *     `age > NaN` is false so no entry ever expires.
+ *   - SODA_CACHE_MAX: `size > NaN` is false, so eviction never runs and the map
+ *     grows unbounded.
+ *
+ * Reported on stderr and never thrown: an optional knob with a typo must not
+ * take the server down at import time. stderr is the only usable channel here —
+ * stdout is the MCP JSON-RPC stream.
+ */
+function envInt(name: string, fallback: number, min: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min) {
+    process.stderr.write(
+      `mcp-nychousing: ${name}=${JSON.stringify(raw)} is not an integer >= ${min}; using the default ${fallback}.\n`,
+    );
+    return fallback;
+  }
+  return n;
+}
+
 /** Where to get a free (optional) Socrata app token; tools work without one. */
 const APP_TOKEN_DOCS = "https://dev.socrata.com/docs/app-tokens.html";
 /** Descriptive User-Agent (NYC Open Data is a free public service; be identifiable). */
@@ -174,7 +204,8 @@ class HttpError extends Error {
 }
 class PermanentError extends Error {}
 
-const HTTP_ATTEMPTS = Number(process.env.SODA_HTTP_ATTEMPTS ?? 3);
+// At least one attempt: a zero cap reaches `throw last` with last undefined.
+const HTTP_ATTEMPTS = envInt("SODA_HTTP_ATTEMPTS", 3, 1);
 const RETRY_BACKOFF_MS = [500, 2000];
 const RETRY_DEADLINE_MS = 40_000;
 
@@ -214,8 +245,9 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
 // In memory only, and only successful reads: an MCP server is a short-lived
 // child process, and caching an error would pin a transient failure for the
 // life of it.
-const CACHE_TTL_MS = Number(process.env.SODA_CACHE_TTL_MS ?? 8 * 60 * 60 * 1000);
-const CACHE_MAX = Number(process.env.SODA_CACHE_MAX ?? 300);
+// min 0, because 0 is the documented way to disable the cache.
+const CACHE_TTL_MS = envInt("SODA_CACHE_TTL_MS", 8 * 60 * 60 * 1000, 0);
+const CACHE_MAX = envInt("SODA_CACHE_MAX", 300, 1);
 const cache = new Map<string, { at: number; rows: Row[] }>();
 
 function cacheGet(key: string): Row[] | undefined {
@@ -2365,4 +2397,19 @@ export function createServer(): Server {
 }
 
 // Exported for tests only (not part of the MCP surface).
-export const __test = { resolveBorough, soql, soqlLike, likeCI, likeCIParts, streetDistinctive, eqTextCI, inText, tally, houseNumberVariants, addressHouseNumberVariants, contactNameWhere };
+export const __test = {
+  resolveBorough,
+  soql,
+  soqlLike,
+  likeCI,
+  likeCIParts,
+  streetDistinctive,
+  eqTextCI,
+  inText,
+  tally,
+  houseNumberVariants,
+  addressHouseNumberVariants,
+  contactNameWhere,
+  /** The knob values this module resolved at import. */
+  config: { HTTP_ATTEMPTS, CACHE_TTL_MS, CACHE_MAX },
+};

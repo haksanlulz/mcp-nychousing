@@ -1547,3 +1547,114 @@ describe("response cache", () => {
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFailure);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Environment knobs. Each is read once at import, so a bad value is baked in
+// for the life of the process — and NaN does not fail loudly, it disables the
+// thing it configures. These cases re-import the module with the var set.
+// ---------------------------------------------------------------------------
+
+describe("environment knob validation", () => {
+  const KNOBS = ["SODA_HTTP_ATTEMPTS", "SODA_CACHE_TTL_MS", "SODA_CACHE_MAX"];
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+  afterEach(() => {
+    for (const k of KNOBS) delete process.env[k];
+    vi.resetModules();
+  });
+
+  async function loadWith(name: string, value: string) {
+    for (const k of KNOBS) delete process.env[k];
+    process.env[name] = value;
+    stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    vi.resetModules();
+    return (await import("../server.js")) as typeof import("../server.js");
+  }
+
+  async function connect(mod: typeof import("../server.js")) {
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "knob-test", version: "1.0.0" }, { capabilities: {} });
+    await Promise.all([mod.createServer().connect(st), c.connect(ct)]);
+    return c;
+  }
+  const violArgs = (houseNumber: string) => ({ house_number: houseNumber, street: "Anystreet", borough: "Bronx" });
+
+  it(
+    "SODA_HTTP_ATTEMPTS: a non-numeric value falls back to 3 attempts, not zero",
+    async () => {
+      const mod = await loadWith("SODA_HTTP_ATTEMPTS", "three");
+      expect(mod.__test.config.HTTP_ATTEMPTS).toBe(3);
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("SODA_HTTP_ATTEMPTS"));
+
+      const c = await connect(mod);
+      fetchMock.mockResolvedValue(jsonResponse({ error: true, message: "upstream wobble" }, { ok: false, status: 503 }));
+      const res: any = await c.callTool({ name: "building_violations", arguments: violArgs("1") });
+
+      expect(res.isError).toBe(true);
+      // A NaN cap skips the loop body entirely: no request is made and the
+      // handler renders the undefined `last` as "Error: undefined".
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(res.content[0].text).toContain("upstream wobble");
+      expect(res.content[0].text).not.toMatch(/undefined/);
+    },
+    30_000,
+  );
+
+  it("SODA_CACHE_TTL_MS: a non-numeric value falls back to the 8h default, and entries still expire", async () => {
+    const mod = await loadWith("SODA_CACHE_TTL_MS", "soon");
+    expect(mod.__test.config.CACHE_TTL_MS).toBe(8 * 60 * 60 * 1000);
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("SODA_CACHE_TTL_MS"));
+
+    const c = await connect(mod);
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    // Date.now is the clock the cache reads; setTimeout is left real so the
+    // outbound throttle still behaves.
+    const t0 = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(t0);
+    try {
+      await c.callTool({ name: "building_violations", arguments: violArgs("1") });
+      const afterFirst = fetchMock.mock.calls.length;
+      await c.callTool({ name: "building_violations", arguments: violArgs("1") });
+      expect(fetchMock.mock.calls.length).toBe(afterFirst); // served from cache
+
+      nowSpy.mockReturnValue(t0 + 8 * 60 * 60 * 1000 + 1_000);
+      await c.callTool({ name: "building_violations", arguments: violArgs("1") });
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(afterFirst); // expired, refetched
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("SODA_CACHE_MAX: a non-numeric value falls back to 300, and eviction runs at the configured cap", async () => {
+    // Two halves on purpose. Below 301 entries a NaN cap and the 300 default are
+    // behaviourally identical (`size > NaN` and `size > 300` are both false), so
+    // no cheap behavioural test separates them: the resolved value is asserted
+    // directly, and the eviction loop is proven at a small valid cap.
+    const bad = await loadWith("SODA_CACHE_MAX", "lots");
+    expect(bad.__test.config.CACHE_MAX).toBe(300);
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("SODA_CACHE_MAX"));
+
+    const mod = await loadWith("SODA_CACHE_MAX", "2");
+    expect(mod.__test.config.CACHE_MAX).toBe(2);
+    const c = await connect(mod);
+    fetchMock.mockResolvedValue(jsonResponse([]));
+
+    for (const hn of ["1", "2", "3"]) await c.callTool({ name: "building_violations", arguments: violArgs(hn) });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Inserting "3" evicted "1" (oldest), so asking for it again refetches...
+    await c.callTool({ name: "building_violations", arguments: violArgs("1") });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    // ... while "3" is still resident.
+    await c.callTool({ name: "building_violations", arguments: violArgs("3") });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("an out-of-range or empty value is handled without throwing at import", async () => {
+    expect((await loadWith("SODA_HTTP_ATTEMPTS", "0")).__test.config.HTTP_ATTEMPTS).toBe(3);
+    expect((await loadWith("SODA_CACHE_MAX", "-5")).__test.config.CACHE_MAX).toBe(300);
+    expect((await loadWith("SODA_CACHE_TTL_MS", "1.5")).__test.config.CACHE_TTL_MS).toBe(8 * 60 * 60 * 1000);
+    // 0 is the documented way to disable the cache and must survive.
+    expect((await loadWith("SODA_CACHE_TTL_MS", "0")).__test.config.CACHE_TTL_MS).toBe(0);
+    expect((await loadWith("SODA_CACHE_TTL_MS", "  ")).__test.config.CACHE_TTL_MS).toBe(8 * 60 * 60 * 1000);
+  });
+});
