@@ -490,6 +490,74 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
     expect(body.note).toMatch(/120-15|hyphenat/i);
   });
 
+  it("addressHouseNumberVariants rewrites only the leading house-number token", () => {
+    expect(__test.addressHouseNumberVariants("12015 Queens Boulevard", { hyphenateDigits: true })).toEqual([
+      "12015 Queens Boulevard",
+      "120-15 Queens Boulevard",
+    ]);
+    // Not a house number: left alone rather than rewritten into another address.
+    expect(__test.addressHouseNumberVariants("Queens Boulevard", { hyphenateDigits: true })).toEqual(["Queens Boulevard"]);
+    expect(__test.addressHouseNumberVariants("1520 Sedgwick Avenue")).toEqual(["1520 Sedgwick Avenue"]);
+  });
+
+  // DOB and 311 both store the outer-borough spelling (live 2026-09-14:
+  // 3h2n-5cm9 holds "59-11"/"90-15" on QUEENS BLVD; erm2-nwe9 holds
+  // "107-36 QUEENS BOULEVARD"), and both used to ship a prose note telling the
+  // caller to retry by hand instead of probing.
+  it("dob_building retries the hyphenated spelling and names the winner", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([])) // violations summary, literal "9015": zero
+      .mockResolvedValueOnce(jsonResponse([{ violation_category: "V-DOB VIOLATION - ACTIVE", n: "4" }])) // "90-15": hit
+      .mockResolvedValueOnce(jsonResponse([{ number: "V1", violation_category: "V-DOB VIOLATION - ACTIVE" }])) // detail
+      .mockResolvedValueOnce(jsonResponse([])) // complaints summary, literal: zero
+      .mockResolvedValueOnce(jsonResponse([{ status: "ACTIVE", n: "2" }])) // "90-15": hit
+      .mockResolvedValueOnce(jsonResponse([{ complaint_number: "5551", status: "ACTIVE" }])); // detail
+    const body = payload(await call("dob_building", { house_number: "9015", street: "Queens Blvd", borough: "Queens" }));
+
+    // The second spelling was attempted, for BOTH sections.
+    expect(whereOf(0)).toContain("upper(house_number)='9015'");
+    expect(whereOf(1)).toContain("upper(house_number)='90-15'");
+    expect(whereOf(3)).toContain("upper(house_number)='9015'");
+    expect(whereOf(4)).toContain("upper(house_number)='90-15'");
+    // Not a silent zero.
+    expect(body.violations.total_matching).toBe(4);
+    expect(body.complaints.total_matching).toBe(2);
+    // The detail page uses the winning spelling.
+    expect(whereOf(2)).toContain("upper(house_number)='90-15'");
+    // And the winner is named.
+    expect(body.query.house_number_matched).toEqual({ violations: "90-15", complaints: "90-15" });
+    expect(body.note).toMatch(/90-15/);
+  });
+
+  it("building_311 retries the hyphenated address and names the winner", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([])) // literal "10736 Queens Boulevard": zero
+      .mockResolvedValueOnce(jsonResponse([{ status: "CLOSED", n: "11" }])) // "107-36 ...": hit
+      .mockResolvedValueOnce(jsonResponse([{ unique_key: "1", complaint_type: "HEAT/HOT WATER", status: "CLOSED" }]));
+    const body = payload(await call("building_311", { address: "10736 Queens Boulevard", borough: "Queens" }));
+
+    // Both probes are count-only and keep the $q narrowing.
+    expect(urlOf(0).searchParams.get("$q")).toBe("10736 Queens Boulevard");
+    expect(urlOf(0).searchParams.get("$select")).toContain("count(1)");
+    expect(urlOf(1).searchParams.get("$q")).toBe("107-36 Queens Boulevard");
+    expect(whereOf(1)).toContain("upper(incident_address) like '%107-36 QUEENS BOULEVARD%'");
+    // Not a silent zero, and the detail page rides the winning spelling.
+    expect(body.summary.total_matching).toBe(11);
+    expect(urlOf(2).searchParams.get("$q")).toBe("107-36 Queens Boulevard");
+    expect(body.query.address).toBe("107-36 Queens Boulevard");
+    expect(body.query.address_searched).toBe("10736 Queens Boulevard");
+    expect(body.note).toMatch(/107-36/);
+  });
+
+  it("building_311 stops at the literal spelling when it already matches", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([{ status: "CLOSED", n: "3" }]))
+      .mockResolvedValueOnce(jsonResponse([]));
+    await call("building_311", { address: "10736 Queens Boulevard", borough: "Queens" });
+    // Summary + detail only: no second spelling is probed once the first hits.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("building_violations reports zero when no variant matches", async () => {
     // Both the literal and the hyphenated variant return empty.
     fetchMock.mockResolvedValue(jsonResponse([]));

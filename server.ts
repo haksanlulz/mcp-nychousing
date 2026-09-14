@@ -565,6 +565,27 @@ function houseNumberVariants(input: string, opts: { hyphenateDigits?: boolean } 
 }
 
 /**
+ * House-number spellings for a COMBINED address line ("12015 Queens Boulevard"
+ * -> ["12015 Queens Boulevard", "120-15 Queens Boulevard"]).
+ *
+ * Only the leading token is rewritten, and only when it starts with a digit;
+ * an address that does not begin with a house number is returned unchanged, so
+ * nothing is rewritten into an unrelated address.
+ */
+function addressHouseNumberVariants(address: string, opts: { hyphenateDigits?: boolean } = {}): string[] {
+  const trimmed = address.trim();
+  const m = /^(\S+)(\s+.+)$/.exec(trimmed);
+  if (!m || !/^\d/.test(m[1])) return [trimmed];
+  const rest = m[2];
+  const out: string[] = [];
+  for (const v of houseNumberVariants(m[1], opts)) {
+    const candidate = `${v}${rest}`;
+    if (!out.includes(candidate)) out.push(candidate);
+  }
+  return out;
+}
+
+/**
  * Run `probe` for each house-number spelling variant until one reports a match,
  * defeating the hyphenation silent-zero. Returns the matching variant's result
  * (and which spelling won); if none match, returns the first (literal) attempt's
@@ -2053,18 +2074,28 @@ async function dobBuilding(args: Row): Promise<unknown> {
   const boro = resolveBorough(args.borough);
   const limit = clampLimit(args.limit, 50);
 
+  // DOB stores house numbers as filed, which for outer-borough addresses is
+  // hyphenated (live 2026-09-14: 3h2n-5cm9 holds "59-11"/"90-15" on QUEENS
+  // BLVD), so a de-hyphenated Queens number reads as a clean building. Probe the
+  // spellings the way every other per-building tool does instead of telling the
+  // caller to retry by hand — a note only helps a reader who already suspects
+  // the zero. The two datasets are probed independently: a building can be filed
+  // one way in violations and another in complaints.
+  const variants = houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" });
+
   // DOB violations: boro is a numeric-as-text code ("1".."5").
-  const violWhere = whereAnd([
-    eqText("boro", String(boro.id)),
-    eqTextCI("house_number", houseNumberInput),
-    likeCI("street", street),
-  ]);
-  const violSummaryRows = await sodaGet(DATASET.dobViolations, {
-    $select: "violation_category,count(1) as n",
-    $where: violWhere,
-    $group: "violation_category",
+  const violResolved = await tryHouseNumberVariants(variants, async (houseNumber) => {
+    const where = whereAnd([eqText("boro", String(boro.id)), eqTextCI("house_number", houseNumber), likeCI("street", street)]);
+    const rows = await sodaGet(DATASET.dobViolations, {
+      $select: "violation_category,count(1) as n",
+      $where: where,
+      $group: "violation_category",
+    });
+    const t = tally(rows, "violation_category");
+    return { matched: t.total > 0, value: { where, ...t } };
   });
-  const violSummary = tally(violSummaryRows, "violation_category");
+  const violWhere = violResolved.value.where;
+  const violSummary = violResolved.value;
   const violRows =
     violSummary.total > 0
       ? await sodaGet(DATASET.dobViolations, { $where: violWhere, $order: "issue_date DESC", $limit: limit })
@@ -2072,24 +2103,58 @@ async function dobBuilding(args: Row): Promise<unknown> {
 
   // DOB complaints: NO borough column; the community board's first digit is the
   // borough code, so filter with starts_with once a borough is known.
-  const compWhere = whereAnd([
-    eqTextCI("house_number", houseNumberInput),
-    likeCI("house_street", street),
-    `starts_with(community_board, '${boro.id}')`,
-  ]);
-  const compSummaryRows = await sodaGet(DATASET.dobComplaints, {
-    $select: "status,count(1) as n",
-    $where: compWhere,
-    $group: "status",
+  const compResolved = await tryHouseNumberVariants(variants, async (houseNumber) => {
+    const where = whereAnd([
+      eqTextCI("house_number", houseNumber),
+      likeCI("house_street", street),
+      `starts_with(community_board, '${boro.id}')`,
+    ]);
+    const rows = await sodaGet(DATASET.dobComplaints, {
+      $select: "status,count(1) as n",
+      $where: where,
+      $group: "status",
+    });
+    const t = tally(rows, "status");
+    return { matched: t.total > 0, value: { where, ...t } };
   });
-  const compSummary = tally(compSummaryRows, "status");
+  const compWhere = compResolved.value.where;
+  const compSummary = compResolved.value;
   const compRows =
     compSummary.total > 0
       ? await sodaGet(DATASET.dobComplaints, { $where: compWhere, $order: "date_entered DESC", $limit: limit })
       : [];
 
+  const notes: string[] = [];
+  if (violResolved.matchedVariant) {
+    notes.push(
+      `No DOB violations under "${houseNumberInput}"; matched DOB's stored house number "${violResolved.houseNumber}".`,
+    );
+  }
+  if (compResolved.matchedVariant) {
+    notes.push(
+      `No DOB complaints under "${houseNumberInput}"; matched DOB's stored house number "${compResolved.houseNumber}".`,
+    );
+  }
+  if (violSummary.total === 0 && compSummary.total === 0 && variants.length > 1) {
+    notes.push(`Both sections read zero. Tried house-number spellings: ${variants.join(", ")}.`);
+  }
+  notes.push(
+    "DOB records use the agency's raw formats (dates often YYYYMMDD; complaint categories and " +
+      "disposition codes are DOB's own code tables). DOB house numbers are stored as filed, which " +
+      "for outer-borough addresses is often hyphenated (e.g. 120-15); every spelling variant is " +
+      "probed before a zero is reported.",
+  );
+
   return {
-    query: { house_number: houseNumberInput, street, borough: boro.text },
+    query: {
+      house_number: houseNumberInput,
+      house_number_matched: {
+        violations: violResolved.matchedVariant ? violResolved.houseNumber : undefined,
+        complaints: compResolved.matchedVariant ? compResolved.houseNumber : undefined,
+      },
+      street,
+      borough: boro.text,
+    },
     violations: {
       total_matching: violSummary.total,
       by_category: violSummary.by,
@@ -2102,11 +2167,7 @@ async function dobBuilding(args: Row): Promise<unknown> {
       returned: compRows.length,
       results: compRows.map(normDobComplaint),
     },
-    note:
-      "DOB records use the agency's raw formats (dates often YYYYMMDD; complaint categories and " +
-      "disposition codes are DOB's own code tables). DOB house numbers are stored as filed, which " +
-      "for outer-borough addresses may be hyphenated (e.g. 120-15) — if both sections read zero on " +
-      "a Queens address, retry with the hyphenated spelling.",
+    note: notes.join(" "),
   };
 }
 
@@ -2117,35 +2178,67 @@ async function building311(args: Row): Promise<unknown> {
   const since = normSince(args.since, "since");
   const limit = clampLimit(args.limit, 50);
 
-  const conditions = [likeCI("incident_address", address), eqTextCI("borough", boro.text)];
-  if (complaintType) {
-    conditions.push(eqTextCI("complaint_type", complaintType));
-  } else {
-    // The current type is HEAT/HOT WATER; HEATING is the pre-2014 label.
-    conditions.push(`upper(complaint_type) in ('HEAT/HOT WATER','HEATING')`);
-  }
-  if (since) conditions.push(gteDate("created_date", since));
-  const where = whereAnd(conditions);
+  const whereFor = (candidate: string): string | undefined => {
+    const conditions = [likeCI("incident_address", candidate), eqTextCI("borough", boro.text)];
+    if (complaintType) {
+      conditions.push(eqTextCI("complaint_type", complaintType));
+    } else {
+      // The current type is HEAT/HOT WATER; HEATING is the pre-2014 label.
+      conditions.push(`upper(complaint_type) in ('HEAT/HOT WATER','HEATING')`);
+    }
+    if (since) conditions.push(gteDate("created_date", since));
+    return whereAnd(conditions);
+  };
+
+  // 311 stores the incident address hyphenated for outer-borough buildings
+  // (live 2026-09-14: "107-36 QUEENS BOULEVARD"), so a de-hyphenated number
+  // returns zero heat complaints and reads as a clean building. Probe the house
+  // number's spelling variants, recombined with the rest of the address line.
+  const variants = addressHouseNumberVariants(address, { hyphenateDigits: boro.text === "QUEENS" });
 
   // The 311 table is ~40M rows and a bare LIKE over incident_address is a full
   // scan (observed: the summary query times out). $q rides the search index, so
   // pass the address there to narrow FIRST; the $where LIKE then refines the
-  // candidate set to exact address substring + borough + type.
-  const summaryRows = await sodaGet(DATASET.threeOneOne, {
-    $q: address,
-    $select: "status,count(1) as n",
-    $where: where,
-    $group: "status",
+  // candidate set to exact address substring + borough + type. Each probe is
+  // count-only and keeps the $q narrowing, and a later spelling is only asked
+  // for after the literal one comes back empty.
+  const resolved = await tryHouseNumberVariants(variants, async (candidate) => {
+    const where = whereFor(candidate);
+    const rows = await sodaGet(DATASET.threeOneOne, {
+      $q: candidate,
+      $select: "status,count(1) as n",
+      $where: where,
+      $group: "status",
+    });
+    const t = tally(rows, "status");
+    return { matched: t.total > 0, value: { where, ...t } };
   });
-  const { total, by } = tally(summaryRows, "status");
+  const matchedAddress = resolved.houseNumber; // the winning full address spelling
+  const { where, total, by } = resolved.value;
   const rows =
     total > 0
-      ? await sodaGet(DATASET.threeOneOne, { $q: address, $where: where, $order: "created_date DESC", $limit: limit })
+      ? await sodaGet(DATASET.threeOneOne, { $q: matchedAddress, $where: where, $order: "created_date DESC", $limit: limit })
       : [];
+
+  const notes: string[] = [];
+  if (resolved.matchedVariant) {
+    notes.push(`No rows under "${address}"; matched 311's stored address "${matchedAddress}".`);
+  }
+  if (total === 0) {
+    const tried = variants.length > 1 ? ` Tried address spellings: ${variants.join(", ")}.` : "";
+    notes.push(
+      "No matching 311 requests." +
+        tried +
+        " The 311 incident address is one combined line (e.g. " +
+        '"1520 SEDGWICK AVENUE"); try the exact street spelling or drop complaint_type to search the ' +
+        "heat/hot-water default.",
+    );
+  }
 
   return {
     query: {
-      address,
+      address: matchedAddress,
+      address_searched: resolved.matchedVariant ? address : undefined,
       borough: boro.text,
       complaint_type: complaintType ?? "HEAT/HOT WATER (+ legacy HEATING)",
       since: str(args.since) ?? null,
@@ -2153,12 +2246,7 @@ async function building311(args: Row): Promise<unknown> {
     summary: { total_matching: total, by_status: by },
     returned: rows.length,
     results: rows.map(norm311),
-    note:
-      total === 0
-        ? "No matching 311 requests. The 311 incident address is one combined line (e.g. " +
-          '"1520 SEDGWICK AVENUE"); try the exact street spelling, a hyphenated outer-borough house ' +
-          "number, or drop complaint_type to search the heat/hot-water default."
-        : undefined,
+    note: notes.length ? notes.join(" ") : undefined,
   };
 }
 
@@ -2277,4 +2365,4 @@ export function createServer(): Server {
 }
 
 // Exported for tests only (not part of the MCP surface).
-export const __test = { resolveBorough, soql, soqlLike, likeCI, likeCIParts, streetDistinctive, eqTextCI, inText, tally, houseNumberVariants, contactNameWhere };
+export const __test = { resolveBorough, soql, soqlLike, likeCI, likeCIParts, streetDistinctive, eqTextCI, inText, tally, houseNumberVariants, addressHouseNumberVariants, contactNameWhere };
