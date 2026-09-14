@@ -139,9 +139,20 @@ const PORTFOLIO_BUILDING_CAP = MAX_RESULTS * 4;
 // Auth (optional app token)
 // ---------------------------------------------------------------------------
 
-/** The Socrata app token if set, else null. Only used to raise the rate limit. */
+/**
+ * The Socrata app token if set, else null. Only used to raise the rate limit.
+ *
+ * An unsubstituted template is treated as unset. The .mcpb manifest injects the
+ * token as NYC_APP_TOKEN=${user_config.app_token} and the field is optional, and
+ * the MCPB spec does not state what a host passes for an optional value the user
+ * left blank - so rather than assume, reject anything still carrying "${", which
+ * can never be a real token. Sending one as X-App-Token would be a bad-credential
+ * header on every request.
+ */
 function optionalToken(): string | null {
-  return process.env.NYC_APP_TOKEN?.trim() || null;
+  const raw = process.env.NYC_APP_TOKEN?.trim();
+  if (!raw || raw.includes("${")) return null;
+  return raw;
 }
 
 /** Request headers. Attaches X-App-Token only when a token is configured. */

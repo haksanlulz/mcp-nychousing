@@ -19,7 +19,8 @@
     "start": "tsx index.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "verify:pack": "node scripts/pack-probe.mjs"
+    "verify:pack": "node scripts/pack-probe.mjs",
+    "verify:mcpb": "node scripts/mcpb-probe.mjs"
   },
   "keywords": [
     "311",
@@ -43,6 +44,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2",
     "@types/node": "^26.1.1",
     "tsx": "^4.23.0",
     "typescript": "^7.0.2",

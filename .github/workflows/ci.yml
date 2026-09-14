@@ -58,6 +58,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify:pack
+      # The second artifact channel: the .mcpb bundle a host installs. Its
+      # entry_point and mcp_config are hand-written strings nothing else reads,
+      # so a bundle that cannot start looks exactly like one that works.
+      - run: npm run verify:mcpb
       - run: npm pack --silent > .tgzname
       - uses: actions/upload-artifact@v4
         with:

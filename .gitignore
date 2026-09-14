@@ -3,4 +3,6 @@ dist/
 .env
 .env.*
 *.log
+*.mcpb
+*.tgz
 .DS_Store

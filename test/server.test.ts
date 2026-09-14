@@ -1063,6 +1063,18 @@ describe("app token + error handling", () => {
     expect(lastInit().headers["X-App-Token"]).toBe("tok_abc");
   });
 
+  // The .mcpb manifest injects NYC_APP_TOKEN=${user_config.app_token}, the field
+  // is optional, and the MCPB spec does not say what a host passes when the user
+  // leaves it blank. An unsubstituted template must not become a bad-credential
+  // header on every request.
+  it("treats an unsubstituted user_config template as no token", async () => {
+    clearSodaCache();
+    process.env.NYC_APP_TOKEN = "${user_config.app_token}";
+    fetchMock.mockResolvedValueOnce(jsonResponse([EVICTION_ROW]));
+    await call("eviction_lookup", { court_index_number: "123456/24" });
+    expect(lastInit().headers["X-App-Token"]).toBeUndefined();
+  });
+
   it("identifies itself to NYC Open Data with a descriptive User-Agent", async () => {
     // Socrata is a free public service and rate-limits anonymous clients harder.
     // A missing UA is invisible to every other assertion in this file, which is
@@ -1674,5 +1686,18 @@ describe("serverInfo version", () => {
     const info = client.getServerVersion();
     expect(info?.version).toBe(pkg.version);
     expect(info?.name).toBe("mcp-nychousing");
+  });
+
+  it("the .mcpb manifest carries the same version", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+    const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8")) as {
+      version: string;
+      server: { entry_point: string; mcp_config: { args: string[] } };
+      user_config: Record<string, { required?: boolean; sensitive?: boolean; type: string }>;
+    };
+    expect(manifest.version).toBe(pkg.version);
+    // The app token raises a rate limit; it does not gate access.
+    expect(manifest.user_config.app_token).toMatchObject({ type: "string", required: false, sensitive: true });
+    expect(manifest.server.mcp_config.args.join(" ")).toContain(manifest.server.entry_point);
   });
 });

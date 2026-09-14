@@ -1,0 +1,71 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/dist/mcpb-manifest-latest.schema.json",
+  "manifest_version": "0.3",
+  "name": "mcp-nychousing",
+  "display_name": "NYC Housing Data",
+  "version": "1.1.1",
+  "description": "Read NYC Open Data for one building or one landlord: HPD violations, complaints, registration and litigation, DOB records, 311 heat complaints, marshal evictions, and ownership two ways (HPD registration and the property record).",
+  "long_description": "A read-only MCP server over NYC Open Data (Socrata/SODA) for tenant organizers, housing-court legal-aid intake, and Right-to-Counsel orgs. Ten tools cover a building's condition, its registered owner and agent, the recorded deed behind them, the rest of that landlord's portfolio, and the building's court and eviction history. No account and no key are required; an optional Socrata app token only raises the per-IP rate limit.",
+  "author": {
+    "name": "Abishai James",
+    "url": "https://github.com/haksanlulz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/haksanlulz/mcp-nychousing"
+  },
+  "homepage": "https://github.com/haksanlulz/mcp-nychousing",
+  "documentation": "https://github.com/haksanlulz/mcp-nychousing#readme",
+  "license": "MIT",
+  "keywords": [
+    "311",
+    "acris",
+    "dob",
+    "evictions",
+    "housing",
+    "hpd",
+    "legal-aid",
+    "nyc-open-data",
+    "ownership",
+    "pluto",
+    "socrata",
+    "tenant-rights"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "NYC_APP_TOKEN": "${user_config.app_token}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "building_violations" },
+    { "name": "building_complaints" },
+    { "name": "who_owns" },
+    { "name": "landlord_portfolio" },
+    { "name": "landlord_litigation" },
+    { "name": "eviction_lookup" },
+    { "name": "building_profile" },
+    { "name": "true_owner" },
+    { "name": "dob_building" },
+    { "name": "building_311" }
+  ],
+  "user_config": {
+    "app_token": {
+      "type": "string",
+      "title": "Socrata app token (optional)",
+      "description": "Leave blank unless you hit rate limits. NYC Open Data is keyless; a free app token from dev.socrata.com only raises the per-IP limit. Every tool works without one.",
+      "required": false,
+      "sensitive": true
+    }
+  },
+  "compatibility": {
+    "runtimes": {
+      "node": ">=18"
+    }
+  }
+}

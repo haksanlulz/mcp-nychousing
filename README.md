@@ -93,6 +93,20 @@ npm run build     # emits dist/; the published bin is dist/index.js
 `npm start` runs the TypeScript directly via [`tsx`](https://github.com/privatenumber/tsx) without building.
 </details>
 
+### Bundle (`.mcpb`)
+
+`manifest.json` describes the server as an [MCP Bundle](https://github.com/anthropics/mcpb), for hosts that install a local server from a single file. Build one:
+
+```bash
+npm run verify:mcpb
+```
+
+That stages `dist/` plus production dependencies, packs the bundle with the vendor CLI (which validates the manifest first), unpacks it, launches the server through the `mcp_config` in the packed manifest, and asserts the ten tools over stdio. It runs in the CI `package` job beside `verify:pack`, so the bundle channel is measured rather than assumed.
+
+The app token is declared as an optional `user_config` field (`required: false`, `sensitive: true`) injected as `NYC_APP_TOKEN`. The server treats a value still containing `${` as unset, so a host that passes an unsubstituted template for a field the user skipped does not produce a bad-credential header.
+
+A bundle carries its own `node_modules`, which means it ships the MCP SDK's `hono` / `express` subtree inside the artifact. The same reasoning as `test/no-http-stack.test.ts` applies to this channel: those packages are present in the dependency tree but unreachable, because nothing in this server imports an HTTP transport. That test reads the source and pins the property; a vulnerability scan of the bundle will still list them.
+
 ## App token (optional)
 
 Every tool works with no token. If you make heavy or bursty use, a free Socrata app token raises the rate limit. Create one from the developer settings on your NYC Open Data account. Docs: https://dev.socrata.com/docs/app-tokens.html
