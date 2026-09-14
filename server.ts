@@ -419,11 +419,22 @@ function likeCI(col: string, value: string): string {
   return `upper(${col}) like '%${soqlLike(value.toUpperCase())}%'`;
 }
 
-/** `upper(col) like '%a%b%'`: the parts must appear in order, with anything
- * between them. Each part is wildcard-escaped; only our separators are live. */
-function likeCIParts(col: string, parts: string[]): string {
-  const pattern = parts.map((p) => soqlLike(p.toUpperCase())).join("%");
-  return `upper(${col}) like '%${pattern}%'`;
+/**
+ * A house number sitting on a TOKEN BOUNDARY inside a free-text address line:
+ * it either starts the line or follows a space, and is followed by a space or
+ * by the hyphen of a range ("2763-69 SEDGWICK AVE").
+ *
+ * A bare `'%<hn>%<street>%'` reads one building's rows onto another, because
+ * the number matches inside a longer number: live 2026-09-14, `'%20%SEDGWICK%'`
+ * in the Bronx returns 13 executed evictions and every one of them belongs to
+ * 1520 SEDGWICK AVENUE. Anchored, the same house 20 returns 0, while house 2763
+ * still returns the range spellings and house 2707 still matches the A/K/A form
+ * ("155B KINGSBRIDGE RD A/K/A 2707 SEDGWICK AVENUE").
+ */
+function houseNumberAnchored(col: string, hn: string): string {
+  const p = soqlLike(hn.toUpperCase());
+  const patterns = [`'${p} %'`, `'${p}-%'`, `'% ${p} %'`, `'% ${p}-%'`];
+  return `(${patterns.map((pat) => `upper(${col}) like ${pat}`).join(" OR ")})`;
 }
 
 /** Generic street-type words. The distinctive part of a street name is what is
@@ -1858,16 +1869,20 @@ async function buildingProfile(args: Row): Promise<unknown> {
   // (a neighbour reads '2755-61 SEDGWICK AVE NUE'). A profile reading zero
   // there is a clean bill of health on a building with executed evictions.
   //
-  // Anchor on the house number plus the street's distinctive token instead.
-  // That is deliberately WIDER than an exact match — house 120 also matches
-  // 1120 — which is why the matched address strings are returned beside the
-  // count rather than a bare number the caller cannot audit.
+  // Anchor the house number on a token boundary and require the street's
+  // distinctive token. That matches the stored range spellings without reading
+  // a longer house number's rows onto this building. It is still WIDER than an
+  // exact match on the street side ("SEDGWICK" also matches "SEDGWICK TERRACE"),
+  // which is why the matched address strings are returned beside the count
+  // rather than a bare number the caller cannot audit.
+  const evictWhere = whereAnd([
+    houseNumberAnchored("eviction_address", hn),
+    likeCI("eviction_address", streetDistinctive(street)),
+    inText("borough", boro.evictionAliases),
+  ]);
   const evictRows = await sodaGet(DATASET.evictions, {
     $select: "eviction_address,count(1) as n",
-    $where: whereAnd([
-      likeCIParts("eviction_address", [hn, streetDistinctive(street)]),
-      inText("borough", boro.evictionAliases),
-    ]),
+    $where: evictWhere,
     $group: "eviction_address",
     $order: "eviction_address",
     $limit: EVICTION_ADDRESS_CAP,
@@ -2417,7 +2432,7 @@ export const __test = {
   soql,
   soqlLike,
   likeCI,
-  likeCIParts,
+  houseNumberAnchored,
   streetDistinctive,
   eqTextCI,
   inText,

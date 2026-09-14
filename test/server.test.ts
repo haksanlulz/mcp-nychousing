@@ -273,6 +273,16 @@ function lastUrl(): URL {
 function whereOf(i: number): string {
   return urlOf(i).searchParams.get("$where") ?? "";
 }
+/** Socrata id of the marshal-evictions dataset (DATASET.evictions). */
+const EVICTIONS_DATASET = "6z8x-wfk4";
+/** $where of the first fetch against a dataset, found by id rather than by
+ *  call index: which call is Nth depends on how many optional sections the
+ *  mocked rows let the handler skip. */
+function whereOfDataset(dataset: string): string {
+  const i = fetchMock.mock.calls.findIndex((c) => String((c[0] as URL).pathname).includes(dataset));
+  if (i < 0) throw new Error(`no fetch against ${dataset}`);
+  return whereOf(i);
+}
 function lastInit(): { headers: Record<string, string> } {
   const call = fetchMock.mock.calls.at(-1);
   if (!call) throw new Error("fetch was not called");
@@ -1364,12 +1374,14 @@ describe("building_profile", () => {
       expect(__test.streetDistinctive("Avenue")).toBe("AVENUE"); // stripping to nothing falls back
     });
 
-    it("likeCIParts joins the parts with a wildcard and escapes each (unit)", () => {
-      expect(__test.likeCIParts("eviction_address", ["2763", "SEDGWICK"])).toBe(
-        "upper(eviction_address) like '%2763%SEDGWICK%'",
+    it("houseNumberAnchored puts the number on a token boundary and escapes it (unit)", () => {
+      expect(__test.houseNumberAnchored("eviction_address", "2763")).toBe(
+        "(upper(eviction_address) like '2763 %' OR upper(eviction_address) like '2763-%'" +
+          " OR upper(eviction_address) like '% 2763 %' OR upper(eviction_address) like '% 2763-%')",
       );
-      expect(__test.likeCIParts("eviction_address", ["100%", "A_B"])).toBe(
-        "upper(eviction_address) like '%100\\%%A\\_B%'",
+      // A wildcard in the caller's input stays literal.
+      expect(__test.houseNumberAnchored("eviction_address", "1_0%")).toContain(
+        "'1\\_0\\% %'",
       );
     });
 
@@ -1397,9 +1409,22 @@ describe("building_profile", () => {
       // Anchored on house number + distinctive token, NOT the composed string
       // that matches none of the stored spellings.
       const w = whereOf(5);
-      expect(w).toContain("upper(eviction_address) like '%2763%SEDGWICK%'");
+      expect(w).toContain("upper(eviction_address) like '2763-%'");
+      expect(w).toContain("upper(eviction_address) like '%SEDGWICK%'");
       expect(w).not.toContain("2763 SEDGWICK AVENUE");
       expect(w).toContain("borough in ('BRONX')");
+    });
+
+    // The house number must not match inside a longer one. Live 2026-09-14
+    // the unanchored '%20%SEDGWICK%' in the Bronx returned 13 executed
+    // evictions, every one of them 1520 SEDGWICK AVENUE's; anchored, 0.
+    it("does not read a longer house number's evictions onto this building", async () => {
+      fetchMock.mockResolvedValue(jsonResponse([]));
+      await call("building_profile", { house_number: "20", street: "Sedgwick Avenue", borough: "Bronx" });
+      const w = whereOfDataset(EVICTIONS_DATASET);
+      expect(w).not.toContain("'%20%SEDGWICK%'");
+      expect(w).toContain("upper(eviction_address) like '20 %'");
+      expect(w).toContain("upper(eviction_address) like '% 20 %'");
     });
   });
 
