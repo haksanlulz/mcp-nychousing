@@ -2368,8 +2368,12 @@ function withRecordScope(name: string, result: unknown): unknown {
 }
 
 export function createServer(): Server {
+  // Kept equal to package.json by a test that reads both, rather than a runtime
+  // JSON import: cheaper, equally effective, and it keeps the runtime free of a
+  // module-resolution wrinkle under NodeNext. A client or registry reading
+  // serverInfo.version had been getting 1.1.0 from a 1.1.1 package.
   const server = new Server(
-    { name: "mcp-nychousing", version: "1.1.0" },
+    { name: "mcp-nychousing", version: "1.1.1" },
     { capabilities: { tools: {} } },
   );
 

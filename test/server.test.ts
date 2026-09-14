@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer, __test, clearSodaCache } from "../server.js";
@@ -1656,5 +1657,22 @@ describe("environment knob validation", () => {
     // 0 is the documented way to disable the cache and must survive.
     expect((await loadWith("SODA_CACHE_TTL_MS", "0")).__test.config.CACHE_TTL_MS).toBe(0);
     expect((await loadWith("SODA_CACHE_TTL_MS", "  ")).__test.config.CACHE_TTL_MS).toBe(8 * 60 * 60 * 1000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The handshake's serverInfo is what a client or registry reads. It is a
+// hand-written literal, so nothing but this test keeps it equal to the package
+// version — it had drifted to 1.1.0 against a 1.1.1 package.
+// ---------------------------------------------------------------------------
+
+describe("serverInfo version", () => {
+  it("matches package.json", async () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { name: string; version: string };
+    const info = client.getServerVersion();
+    expect(info?.version).toBe(pkg.version);
+    expect(info?.name).toBe("mcp-nychousing");
   });
 });
