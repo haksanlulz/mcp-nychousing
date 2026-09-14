@@ -569,6 +569,41 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  // Outside Queens only ONE spelling is generated, so the zero note is the
+  // caller's whole rescue. 311 holds hyphenated addresses in the other
+  // boroughs too (live 2026-09-14: 2,253 Bronx, 725 Manhattan, 205 Brooklyn),
+  // so a note that omits the hyphenated retry leaves them with no next move.
+  it("building_311 zero outside Queens says only one spelling was tried, and names the retry", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_311", { address: "12015 Grand Concourse", borough: "Bronx" }));
+
+    expect(body.summary.total_matching).toBe(0);
+    // One count probe, no detail call and no second spelling.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(body.note)).toContain('Only "12015 Grand Concourse" was tried');
+    expect(String(body.note)).toMatch(/Queens addresses only/);
+    expect(String(body.note)).toMatch(/hyphenated house number/);
+  });
+
+  it("building_311 zero in Queens lists the spellings it actually tried", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_311", { address: "12015 Queens Boulevard", borough: "Queens" }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(body.note)).toContain("Tried address spellings: 12015 Queens Boulevard, 120-15 Queens Boulevard");
+    expect(String(body.note)).not.toContain("was tried:");
+  });
+
+  // The standing DOB note used to assert that every spelling variant is
+  // probed before a zero is reported, which is only true inside Queens.
+  it("dob_building does not claim a spelling probe it did not run", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("dob_building", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+
+    expect(String(body.note)).not.toMatch(/every spelling variant is probed/);
+    expect(String(body.note)).toMatch(/Queens addresses only/);
+  });
+
   it("building_violations reports zero when no variant matches", async () => {
     // Both the literal and the hyphenated variant return empty.
     fetchMock.mockResolvedValue(jsonResponse([]));

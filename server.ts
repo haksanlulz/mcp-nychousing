@@ -2210,8 +2210,10 @@ async function dobBuilding(args: Row): Promise<unknown> {
   notes.push(
     "DOB records use the agency's raw formats (dates often YYYYMMDD; complaint categories and " +
       "disposition codes are DOB's own code tables). DOB house numbers are stored as filed, which " +
-      "for outer-borough addresses is often hyphenated (e.g. 120-15); every spelling variant is " +
-      "probed before a zero is reported.",
+      "for outer-borough addresses is often hyphenated (e.g. 120-15). Separator variants of the " +
+      "number you passed are probed before a zero is reported; splitting a plain number into a " +
+      "hyphenated one is generated for Queens addresses only, so elsewhere try the hyphenated " +
+      "spelling yourself.",
   );
 
   return {
@@ -2294,13 +2296,22 @@ async function building311(args: Row): Promise<unknown> {
     notes.push(`No rows under "${address}"; matched 311's stored address "${matchedAddress}".`);
   }
   if (total === 0) {
-    const tried = variants.length > 1 ? ` Tried address spellings: ${variants.join(", ")}.` : "";
+    // Splitting a plain number into a hyphenated one is generated for QUEENS
+    // only, because rewriting a plain number elsewhere would point at an
+    // unrelated address. 311 does hold hyphenated addresses in the other
+    // boroughs (live 2026-09-14: 2,253 Bronx, 725 Manhattan, 205 Brooklyn),
+    // so outside Queens that retry is the caller's to make, and a zero note
+    // that does not say so leaves them with no next move.
+    const tried =
+      variants.length > 1
+        ? ` Tried address spellings: ${variants.join(", ")}.`
+        : ` Only "${address}" was tried: the digit-split house number is generated for Queens addresses only.`;
     notes.push(
       "No matching 311 requests." +
         tried +
         " The 311 incident address is one combined line (e.g. " +
-        '"1520 SEDGWICK AVENUE"); try the exact street spelling or drop complaint_type to search the ' +
-        "heat/hot-water default.",
+        '"1520 SEDGWICK AVENUE"); try the exact street spelling, a hyphenated house number (311 ' +
+        "stores them outside Queens too), or drop complaint_type to search the heat/hot-water default.",
     );
   }
 
