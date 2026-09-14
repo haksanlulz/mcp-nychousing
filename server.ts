@@ -131,8 +131,10 @@ const PORTFOLIO_ID_CHUNK = 100;
  * chunk is paged to a short read rather than capped at the chunk's id count.
  * Capping at the id count returned 1 of those 87 with no warning. */
 const PORTFOLIO_PAGE_SIZE = MAX_RESULTS;
-/** Hard ceiling on buildings resolved across every chunk. Hitting it emits an
- * explicit truncation note rather than silently shortening the portfolio. */
+/** Ceiling on buildings resolved across every chunk. It is checked after each
+ * page rather than mid-page, so the resolved count can land up to one page
+ * above it; leaving ids unread because of it emits an explicit truncation note
+ * rather than silently shortening the portfolio. */
 const PORTFOLIO_BUILDING_CAP = MAX_RESULTS * 4;
 
 // ---------------------------------------------------------------------------
@@ -1634,10 +1636,6 @@ async function landlordPortfolio(args: Row): Promise<unknown> {
   const resolvedRegIds = new Set<number>();
   let buildingsTruncated = false;
   chunks: for (let i = 0; i < regIds.length; i += PORTFOLIO_ID_CHUNK) {
-    if (buildings.length >= PORTFOLIO_BUILDING_CAP) {
-      buildingsTruncated = true;
-      break;
-    }
     const chunk = regIds.slice(i, i + PORTFOLIO_ID_CHUNK);
     const conditions = [inNum("registrationid", chunk)];
     if (boro) conditions.push(eqText("boro", boro.text));
@@ -1656,11 +1654,24 @@ async function landlordPortfolio(args: Row): Promise<unknown> {
         if (id != null) resolvedRegIds.add(id);
         buildings.push({ ...normRegistration(row), matched_contacts: (id != null && rolesByReg.get(id)) || [] });
       }
-      if (rows.length < PORTFOLIO_PAGE_SIZE) break; // chunk exhausted
-      if (buildings.length >= PORTFOLIO_BUILDING_CAP) {
+      // The ceiling is checked on EVERY page, short ones included, so this loop
+      // decides its own exit. Previously a short page that crossed the ceiling
+      // fell through to the chunk-exhausted break and the NEXT chunk's top-of-
+      // loop guard set the flag — action at a distance that reads like a hole
+      // on the last chunk, which has no next iteration. It is not one: a short
+      // page means the chunk is exhausted, and an exhausted last chunk leaves
+      // nothing unread. Hence `moreToRead`: truncation is ids left unread, not
+      // a count above the ceiling. Reporting it on the count alone would print
+      // "this portfolio is larger than the count above" over a complete one
+      // (pinned both ways in test/server.test.ts, "crossing the resolution
+      // ceiling on a chunk's short final page").
+      const chunkExhausted = rows.length < PORTFOLIO_PAGE_SIZE;
+      const moreToRead = !chunkExhausted || i + PORTFOLIO_ID_CHUNK < regIds.length;
+      if (buildings.length >= PORTFOLIO_BUILDING_CAP && moreToRead) {
         buildingsTruncated = true;
         break chunks;
       }
+      if (chunkExhausted) break;
     }
   }
   // Group the portfolio for reading: borough, then address.

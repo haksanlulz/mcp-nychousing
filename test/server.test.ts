@@ -993,6 +993,83 @@ describe("landlord_portfolio", () => {
       expect(body.note).toMatch(/ceiling|larger than the count/i);
       expect(body.note).not.toMatch(/superseded/); // an unread chunk is not a superseded filing
     });
+
+    // The ceiling is checked after each page, so crossing it on a SHORT page is
+    // a different shape from crossing it on a full one, and it can only happen
+    // on a chunk after the first (a chunk starting at offset 0 reaches the
+    // ceiling on a full page). Both directions are pinned below: truncation is
+    // "ids left unread", not "count above the ceiling".
+    describe("crossing the resolution ceiling on a chunk's short final page", () => {
+      /** Registration rows per IN() chunk, honouring $limit/$offset the way
+       *  SODA pages, so a multi-chunk portfolio can be driven end to end. */
+      function pagedChunks(rowsById: Map<string, unknown[]>) {
+        return async (url: URL) => {
+          const ids = (url.searchParams.get("$where") ?? "").match(/registrationid in \(([^)]*)\)/);
+          const rows = (ids ? ids[1].split(",") : []).flatMap((id) => rowsById.get(id.trim()) ?? []);
+          const limit = Number(url.searchParams.get("$limit") ?? rows.length);
+          const offset = Number(url.searchParams.get("$offset") ?? 0);
+          return jsonResponse(rows.slice(offset, offset + limit));
+        };
+      }
+      /** `count` buildings spread over `ids`, the first id carrying the excess. */
+      function spread(ids: string[], count: number, rowsById: Map<string, unknown[]>) {
+        for (const [n, id] of ids.entries()) {
+          const own = n === 0 ? count - (ids.length - 1) : 1;
+          rowsById.set(
+            id,
+            Array.from({ length: own }, (_, i) => ({
+              ...portfolioRows[0],
+              registrationid: id,
+              buildingid: `${id}${String(i).padStart(4, "0")}`,
+            })),
+          );
+        }
+      }
+      function contactsFor(ids: string[]) {
+        return ids.map((id) => ({ ...oneContact[0], registrationcontactid: `${id}01`, registrationid: id }));
+      }
+
+      // PORTFOLIO_ID_CHUNK is 100, the page is 500, the ceiling 2000. Chunk 1
+      // pages 500/500/500/300 to 1,800; chunk 2 is one short page of 250, which
+      // takes the running total to 2,050 on the LAST chunk — nothing is left
+      // unread, so there is nothing to warn about.
+      it("does not claim truncation when the last chunk simply ran past it", async () => {
+        const ids = Array.from({ length: 150 }, (_, i) => String(500000 + i));
+        const rowsById = new Map<string, unknown[]>();
+        spread(ids.slice(0, 100), 1800, rowsById);
+        spread(ids.slice(100), 250, rowsById);
+        fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "150" }]));
+        fetchMock.mockResolvedValueOnce(jsonResponse(contactsFor(ids)));
+        fetchMock.mockImplementation(pagedChunks(rowsById));
+
+        const body = payload(await call("landlord_portfolio", { name: "Mega", limit: 1 }));
+        expect(body.summary).toMatchObject({ distinct_registrations: 150, buildings_found: 2050 });
+        expect(body.note).not.toMatch(/ceiling|larger than the count/i);
+        // Every id resolved, so nothing may be blamed on a superseded filing.
+        expect(body.note).not.toMatch(/superseded/);
+        expect(fetchMock).toHaveBeenCalledTimes(7); // count, scan, 4 pages, 1 page
+      });
+
+      // Same crossing, but a third chunk is still unread behind it. That IS
+      // truncation, and it has to be said out loud on the page that crosses —
+      // not left to the next chunk's turn, which never comes for the last one.
+      it("reports truncation when a chunk is left unread behind the crossing", async () => {
+        const ids = Array.from({ length: 250 }, (_, i) => String(600000 + i));
+        const rowsById = new Map<string, unknown[]>();
+        spread(ids.slice(0, 100), 1800, rowsById);
+        spread(ids.slice(100, 200), 250, rowsById);
+        spread(ids.slice(200), 400, rowsById); // never read
+        fetchMock.mockResolvedValueOnce(jsonResponse([{ n: "250" }]));
+        fetchMock.mockResolvedValueOnce(jsonResponse(contactsFor(ids)));
+        fetchMock.mockImplementation(pagedChunks(rowsById));
+
+        const body = payload(await call("landlord_portfolio", { name: "Mega", limit: 1 }));
+        expect(body.summary.buildings_found).toBe(2050);
+        expect(body.note).toMatch(/ceiling|larger than the count/i);
+        expect(body.note).not.toMatch(/superseded/); // the unread chunk is not a superseded filing
+        expect(fetchMock).toHaveBeenCalledTimes(7); // the third chunk is never requested
+      });
+    });
   });
 });
 
