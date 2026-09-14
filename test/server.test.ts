@@ -1184,6 +1184,57 @@ describe("true_owner", () => {
     expect(body.found).toBe(false);
     expect(String(body.note)).toContain("PLUTO");
   });
+
+  // The legals dataset carries NO recorded-date column, so an unordered read
+  // makes the candidate set arbitrary and latest_deed right only by luck. Live
+  // 2026-09-14, Manhattan block 1301 lot 1 has 226 documents, 176 of them
+  // legacy FT_* ids that sort above every modern id.
+  describe("document ordering", () => {
+    it("enumerates the legals rows in an explicit order", async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse([PLUTO_ROW]))
+        .mockResolvedValueOnce(jsonResponse(ACRIS_LEGAL_ROWS))
+        .mockResolvedValue(jsonResponse([]));
+      await call("true_owner", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" });
+      expect(urlOf(1).searchParams.get("$order")).toBe("document_id");
+    });
+
+    it("resolves recency through recorded_datetime over every id, not a document_id sort", async () => {
+      // 300 ids spans two IN() chunks; the newest deed sits in the SECOND one,
+      // and its id sorts below the legacy FT_ ids in the first.
+      const legals = [
+        ...Array.from({ length: 250 }, (_, i) => ({ document_id: `FT_199000${1000 + i}` })),
+        ...Array.from({ length: 50 }, (_, i) => ({ document_id: `20200310006${270 + i}01` })),
+      ];
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse([PLUTO_ROW]))
+        .mockResolvedValueOnce(jsonResponse(legals))
+        .mockResolvedValueOnce(jsonResponse([{ document_id: "FT_1990001000", doc_type: "DEED", recorded_datetime: "1990-01-02T00:00:00.000" }]))
+        .mockResolvedValueOnce(jsonResponse([{ document_id: "2020031000627001", doc_type: "DEED", recorded_datetime: "2020-05-13T00:00:00.000" }]))
+        .mockResolvedValue(jsonResponse([]));
+      const body = payload(await call("true_owner", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+
+      // Both chunks were asked, each ordered by recorded_datetime.
+      expect(whereOf(2)).toContain("FT_1990001000");
+      expect(whereOf(3)).toContain("2020031000627001");
+      expect(urlOf(2).searchParams.get("$order")).toBe("recorded_datetime DESC");
+      // The merge picks the genuinely newest across both chunks.
+      expect(body.acris_documents[0].document_id).toBe("2020031000627001");
+      expect(body.latest_deed.document_id).toBe("2020031000627001");
+    });
+
+    it("puts the truncation caveat on latest_deed, not only in acris_note", async () => {
+      const legals = Array.from({ length: 1000 }, (_, i) => ({ document_id: `2020031000${600000 + i}` }));
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse([PLUTO_ROW]))
+        .mockResolvedValueOnce(jsonResponse(legals))
+        .mockResolvedValue(jsonResponse([{ document_id: "2020031000627001", doc_type: "DEED", recorded_datetime: "2020-05-13T00:00:00.000" }]));
+      const body = payload(await call("true_owner", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+
+      expect(String(body.acris_note)).toMatch(/at least 1000/);
+      expect(String(body.latest_deed.caveat)).toMatch(/cap|older deed/i);
+    });
+  });
 });
 
 describe("building_profile", () => {

@@ -1278,6 +1278,10 @@ const CONTACT_IDENTITY_COLS = [
 const CONTACT_IDENTITY_CAP = 200;
 /** Distinct stored eviction-address spellings reported per building profile. */
 const EVICTION_ADDRESS_CAP = 50;
+/** Recorded documents enumerated per ACRIS lot before the read is capped. */
+const ACRIS_DOC_CAP = 1000;
+/** Document ids per IN() chunk against the ACRIS master (URL-length bound). */
+const ACRIS_ID_CHUNK = 200;
 
 /**
  * Distinct registration contacts for a set of registration ids, with the raw
@@ -1866,6 +1870,41 @@ async function buildingProfile(args: Row): Promise<unknown> {
   };
 }
 
+/**
+ * The newest ACRIS master documents across EVERY document id on a lot,
+ * chunked by IN() and re-sorted client-side.
+ *
+ * Recency has to come from acrisMaster.recorded_datetime, because the legals
+ * dataset carries no date column at all (document_id, record_type, borough,
+ * block, lot, easement, partial_lot, air_rights, subterranean_rights,
+ * property_type, street_number, street_name, unit, good_through_date) and
+ * document_id is NOT a usable proxy: it is lexical, and the legacy `FT_*` ids
+ * sort above every modern YYYYMMDD-prefixed id. Live 2026-09-14, Manhattan
+ * block 1301 lot 1: 176 of its 226 documents are FT_*, and the first 150 under
+ * `$order=document_id DESC` are all legacy — a candidate set with no modern
+ * document in it.
+ *
+ * Asking each chunk for its own newest N and merging gives the true global
+ * newest N, since the winner of the whole set is the winner of some chunk.
+ */
+async function acrisNewest(docIds: string[], limit: number, extra?: string): Promise<Row[]> {
+  const out: Row[] = [];
+  for (let i = 0; i < docIds.length; i += ACRIS_ID_CHUNK) {
+    const conditions = [inText("document_id", docIds.slice(i, i + ACRIS_ID_CHUNK))];
+    if (extra) conditions.push(extra);
+    const rows = await sodaGet(DATASET.acrisMaster, {
+      $where: whereAnd(conditions),
+      $order: "recorded_datetime DESC",
+      $limit: limit,
+    });
+    out.push(...rows);
+  }
+  // recorded_datetime is an ISO-ordered floating timestamp, so a string compare
+  // is a chronological one.
+  out.sort((a, b) => String(b.recorded_datetime ?? "").localeCompare(String(a.recorded_datetime ?? "")));
+  return out.slice(0, limit);
+}
+
 async function trueOwner(args: Row): Promise<unknown> {
   const houseNumberInput = reqStr(args.house_number, "house_number");
   const street = reqStr(args.street, "street");
@@ -1918,16 +1957,17 @@ async function trueOwner(args: Row): Promise<unknown> {
     const legalRows = await sodaGet(DATASET.acrisLegals, {
       $select: "document_id",
       $where: whereAnd([eqText("borough", String(boro.id)), eqText("block", String(block)), eqText("lot", String(lot))]),
-      $limit: 200,
+      // Socrata's default ordering is unspecified, so without this the candidate
+      // set on a lot above the cap is arbitrary. This orders the ENUMERATION; it
+      // is not a date sort and is never used as one (see acrisNewest).
+      $order: "document_id",
+      $limit: ACRIS_DOC_CAP,
     });
+    const docsTruncated = legalRows.length >= ACRIS_DOC_CAP;
     const docIds = [...new Set(legalRows.map((r) => str(r.document_id)).filter((s): s is string => s != null))];
     if (docIds.length) {
-      // Newest first by recorded date; then join parties for just the page shown.
-      const masterRows = await sodaGet(DATASET.acrisMaster, {
-        $where: inText("document_id", docIds.slice(0, 150)),
-        $order: "recorded_datetime DESC",
-        $limit: docsLimit,
-      });
+      // Newest first by recorded date, across EVERY document id on the lot.
+      const masterRows = await acrisNewest(docIds, docsLimit);
       const shownIds = masterRows.map((m) => str(m.document_id)).filter((s): s is string => s != null);
       const partyRows = shownIds.length
         ? await sodaGet(DATASET.acrisParties, { $where: inText("document_id", shownIds), $limit: 400 })
@@ -1939,19 +1979,19 @@ async function trueOwner(args: Row): Promise<unknown> {
         (partiesByDoc.get(id) ?? partiesByDoc.set(id, []).get(id)!).push(p);
       }
       acrisDocs = masterRows.map((m) => normAcrisDoc(m, partiesByDoc.get(str(m.document_id) ?? "") ?? []));
-      if (docIds.length > 150) {
-        acrisNote = `This lot has ${docIds.length} recorded documents; the ${docsLimit} newest of the first 150 are shown.`;
+      if (docsTruncated) {
+        acrisNote =
+          `This lot has at least ${docIds.length} recorded documents and the read stopped at the ` +
+          "server's cap, so both the list below and latest_deed may miss older filings.";
+      } else if (docIds.length > acrisDocs.length) {
+        acrisNote = `This lot has ${docIds.length} recorded documents; the ${acrisDocs.length} newest are shown.`;
       }
       // "Who bought this building last" is the headline question, and the
       // newest N documents are often SUBM/AGMT paperwork with the last deed
       // buried deeper (live: 1520 Sedgwick's top 3 held no deed at all). Chase
-      // the latest DEED-family instrument specifically, one extra query.
+      // the latest DEED-family instrument specifically.
       if (!acrisDocs.some((d) => String(d.doc_type ?? "").startsWith("DEED"))) {
-        const deedRows = await sodaGet(DATASET.acrisMaster, {
-          $where: whereAnd([inText("document_id", docIds.slice(0, 150)), `doc_type like 'DEED%'`]),
-          $order: "recorded_datetime DESC",
-          $limit: 1,
-        });
+        const deedRows = await acrisNewest(docIds, 1, `doc_type like 'DEED%'`);
         if (deedRows.length) {
           const deedId = str(deedRows[0].document_id);
           const deedParties = deedId
@@ -1961,6 +2001,14 @@ async function trueOwner(args: Row): Promise<unknown> {
         }
       } else {
         latestDeed = acrisDocs.find((d) => String(d.doc_type ?? "").startsWith("DEED")) ?? null;
+      }
+      // The caveat rides latest_deed itself. It is read as a standalone answer
+      // ("who bought this building last"), so a warning that lives only in
+      // acris_note is a warning the reader of that field never sees.
+      if (latestDeed && docsTruncated) {
+        latestDeed.caveat =
+          `Resolved over the first ${docIds.length} of this lot's recorded documents (the server's ` +
+          "cap); an older deed set may exist beyond it.";
       }
     }
   }
