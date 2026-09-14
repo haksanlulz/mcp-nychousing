@@ -1336,6 +1336,7 @@ describe("building_profile", () => {
       .mockResolvedValueOnce(jsonResponse(VIOLATION_SUMMARY)) // violations by class
       .mockResolvedValueOnce(jsonResponse(COMPLAINT_SUMMARY)) // complaints by status
       .mockResolvedValueOnce(jsonResponse([{ casestatus: "CLOSED", n: "2" }])) // litigation
+      .mockResolvedValueOnce(jsonResponse([{ eviction_address: "1520 SEDGWICK AVENUE", n: "3" }])) // eviction spellings
       .mockResolvedValueOnce(jsonResponse([{ n: "3" }])) // evictions count
       .mockResolvedValueOnce(jsonResponse([])) // aep
       .mockResolvedValueOnce(jsonResponse([])) // vacate
@@ -1398,6 +1399,7 @@ describe("building_profile", () => {
             { eviction_address: "2763-69 SEDGWICK AVE NUE", n: "4" },
           ]),
         )
+        .mockResolvedValueOnce(jsonResponse([{ n: "9" }])) // headline count, its own aggregate
         .mockResolvedValue(jsonResponse([]));
       const body = payload(await call("building_profile", { house_number: "2763", street: "Sedgwick Avenue", borough: "Bronx" }));
 
@@ -1413,6 +1415,36 @@ describe("building_profile", () => {
       expect(w).toContain("upper(eviction_address) like '%SEDGWICK%'");
       expect(w).not.toContain("2763 SEDGWICK AVENUE");
       expect(w).toContain("borough in ('BRONX')");
+    });
+
+    // The grouped address page stops at EVICTION_ADDRESS_CAP distinct
+    // spellings. Summing it would make that display cap the headline count,
+    // so the count comes from its own aggregate over the same $where.
+    it("takes evictions_executed from a count query, not the capped address page", async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW])) // registrations
+        .mockResolvedValueOnce(jsonResponse([])) // contacts
+        .mockResolvedValueOnce(jsonResponse([])) // violations
+        .mockResolvedValueOnce(jsonResponse([])) // complaints
+        .mockResolvedValueOnce(jsonResponse([])) // litigation
+        .mockResolvedValueOnce(
+          jsonResponse([{ eviction_address: "2763-69 SEDGWICK AVE", n: "5" }]),
+        )
+        .mockResolvedValueOnce(jsonResponse([{ n: "41" }])) // the real total
+        .mockResolvedValue(jsonResponse([]));
+      const body = payload(await call("building_profile", { house_number: "2763", street: "Sedgwick Avenue", borough: "Bronx" }));
+
+      expect(body.evictions_executed).toBe(41);
+      expect(body.evictions_matched_addresses).toEqual([{ address: "2763-69 SEDGWICK AVE", count: 5 }]);
+      // Same $where on both, so the count describes the listed match.
+      const calls = fetchMock.mock.calls.filter((c) =>
+        String((c[0] as URL).pathname).includes(EVICTIONS_DATASET),
+      );
+      expect(calls).toHaveLength(2);
+      expect((calls[1][0] as URL).searchParams.get("$select")).toBe("count(1) as n");
+      expect((calls[1][0] as URL).searchParams.get("$where")).toBe(
+        (calls[0][0] as URL).searchParams.get("$where"),
+      );
     });
 
     // The house number must not match inside a longer one. Live 2026-09-14

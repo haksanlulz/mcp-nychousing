@@ -1888,8 +1888,12 @@ async function buildingProfile(args: Row): Promise<unknown> {
     $limit: EVICTION_ADDRESS_CAP,
   });
   const evictionAddresses = evictRows.map((r) => ({ address: str(r.eviction_address), count: num(r.n) ?? 0 }));
-  const evictionsExecuted = evictionAddresses.reduce((sum, a) => sum + a.count, 0);
   const evictionsTruncated = evictRows.length >= EVICTION_ADDRESS_CAP;
+  // The headline count is its own aggregate, not a sum of the page above:
+  // that page stops at EVICTION_ADDRESS_CAP distinct spellings, and summing
+  // it would make the display cap silently become the count.
+  const evictTotalRows = await sodaGet(DATASET.evictions, { $select: "count(1) as n", $where: evictWhere });
+  const evictionsExecuted = num(evictTotalRows[0]?.n) ?? 0;
 
   // AEP (Title Case boro; upper() both sides handles it), vacate (2-letter),
   // bedbug (uppercase), HWO charge count (uppercase).
@@ -1929,9 +1933,9 @@ async function buildingProfile(args: Row): Promise<unknown> {
     hpd_complaints: { total: complaints.total, by_status: complaints.by },
     hpd_litigation: { total: litigation.total, by_status: litigation.by },
     evictions_executed: evictionsExecuted,
-    // The stored spellings that produced the count. The match is house number +
-    // distinctive street token, so a wider hit (120 also matching 1120) is
-    // visible here rather than hidden inside the number.
+    // The stored spellings behind the count. The house number is anchored but
+    // the street is a substring match, so a wider hit (SEDGWICK also matching
+    // SEDGWICK TERRACE) is visible here rather than hidden inside the number.
     evictions_matched_addresses: evictionAddresses,
     evictions_addresses_truncated: evictionsTruncated || undefined,
     aep: { in_program_history: aepRows.length > 0, records: aepRows.map(normAep) },
