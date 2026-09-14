@@ -1425,6 +1425,51 @@ describe("building_profile", () => {
       );
     });
 
+    it("streetTypeWord names the stripped type word, or null (unit)", () => {
+      expect(__test.streetTypeWord("Sedgwick Avenue")).toBe("AVENUE");
+      expect(__test.streetTypeWord("White Plains Rd")).toBe("RD");
+      expect(__test.streetTypeWord("Grand Concourse")).toBeNull();
+      expect(__test.streetTypeWord("Avenue")).toBeNull(); // nothing left to strip
+    });
+
+    it("streetAnchored bounds the distinctive token and requires a type stem (unit)", () => {
+      const w = __test.streetAnchored("eviction_address", "Ocean Avenue");
+      // Bounded: '% OCEAN %' matches "1650 OCEAN PARKWAY", so the type stem is
+      // what separates Ocean Avenue from Ocean Parkway.
+      expect(w).toContain("upper(eviction_address) like '% OCEAN %'");
+      expect(w).not.toContain("like '%OCEAN%'");
+      expect(w).toContain("upper(eviction_address) like '%AV%'");
+      // A street with no type word carries no stem condition at all.
+      expect(__test.streetAnchored("eviction_address", "Grand Concourse")).toBe(
+        "(upper(eviction_address) like 'GRAND CONCOURSE %'" +
+          " OR upper(eviction_address) like '% GRAND CONCOURSE %'" +
+          " OR upper(eviction_address) like '% GRAND CONCOURSE'" +
+          " OR upper(eviction_address) like 'GRAND CONCOURSE')",
+      );
+      // A wildcard in the caller's input stays literal.
+      expect(__test.streetAnchored("eviction_address", "A%B Street")).toContain("'A\\%B %'");
+    });
+
+    // The abbreviation is not always a prefix of the caller's word. Taking the
+    // first two letters of "ROAD" would require "RO" of a line reading
+    // "3704 WHITE PLAINS RD"; live 2026-09-14, 4064 Bronx Boulevard drops from
+    // 13 executed evictions to 0 under that rule.
+    it("accepts the stored abbreviation for each type family (unit)", () => {
+      const cases: [string, string][] = [
+        ["White Plains Road", "RD"],
+        ["Bronx Boulevard", "BL"],
+        ["Santa Monica Lane", "LN"],
+        ["Lynn Court", "CT"],
+        ["Crotona Parkway", "PK"],
+        ["Kings Highway", "HW"],
+      ];
+      for (const [street, abbrevStem] of cases) {
+        expect(__test.streetAnchored("eviction_address", street)).toContain(
+          `upper(eviction_address) like '%${abbrevStem}%'`,
+        );
+      }
+    });
+
     it("counts an eviction stored as a hyphenated house-number range", async () => {
       fetchMock
         .mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW])) // registrations
@@ -1451,7 +1496,11 @@ describe("building_profile", () => {
       // that matches none of the stored spellings.
       const w = whereOf(5);
       expect(w).toContain("upper(eviction_address) like '2763-%'");
-      expect(w).toContain("upper(eviction_address) like '%SEDGWICK%'");
+      expect(w).toContain("upper(eviction_address) like '% SEDGWICK %'");
+      // The street side is anchored too, so the distinctive token cannot match
+      // inside a longer word, and a stem of the type word must appear.
+      expect(w).not.toContain("upper(eviction_address) like '%SEDGWICK%'");
+      expect(w).toContain("upper(eviction_address) like '%AV%'");
       expect(w).not.toContain("2763 SEDGWICK AVENUE");
       expect(w).toContain("borough in ('BRONX')");
     });
@@ -1496,6 +1545,21 @@ describe("building_profile", () => {
       expect(w).not.toContain("'%20%SEDGWICK%'");
       expect(w).toContain("upper(eviction_address) like '20 %'");
       expect(w).toContain("upper(eviction_address) like '% 20 %'");
+    });
+
+    // The same widening one axis over. Live 2026-09-14 the unanchored street
+    // side returned 3 executed evictions for 1650 Ocean Avenue, Brooklyn, all
+    // three of them 1650 OCEAN PARKWAY's, on a registered building with none of
+    // its own; anchored, 0. Two streets in one borough routinely share the
+    // distinctive token.
+    it("does not read another street's evictions onto this building", async () => {
+      fetchMock.mockResolvedValue(jsonResponse([]));
+      await call("building_profile", { house_number: "1650", street: "Ocean Avenue", borough: "Brooklyn" });
+      const w = whereOfDataset(EVICTIONS_DATASET);
+      expect(w).not.toContain("upper(eviction_address) like '%OCEAN%'");
+      expect(w).toContain("upper(eviction_address) like '% OCEAN %'");
+      expect(w).toContain("upper(eviction_address) like '%AV%'");
+      expect(w).toContain("borough in ('BROOKLYN','KINGS')");
     });
   });
 
