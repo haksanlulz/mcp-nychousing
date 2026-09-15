@@ -441,6 +441,13 @@ describe("building_violations", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects an unknown argument with a near-miss, before any network call", async () => {
+    const res: any = await call("building_violations", { house_number: "1", street: "X", borough: "Bronx", sinse: "2026-01-01" });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/building_violations does not accept "sinse" \(did you mean "since"\?\)/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("rejects a malformed since date without calling the API", async () => {
     const res: any = await call("building_violations", { house_number: "1", street: "X", borough: "Bronx", since: "01/2026" });
     expect(res.isError).toBe(true);
