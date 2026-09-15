@@ -1762,6 +1762,45 @@ describe("building_profile", () => {
     });
   });
 
+  // building_profile is the tool the description tells the model to START
+  // HERE with, and it was the only per-building tool with no zero-result note:
+  // a de-hyphenated outer-borough number returned an all-zero profile
+  // (violations, complaints, litigation, evictions, AEP, vacate, bedbug, HWO)
+  // with nothing saying which spellings were tried or that the street is
+  // substring-matched. For a tenant that reads as a clean building.
+  it("says what it tried when every section reads zero", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_profile", { house_number: "12015", street: "Example Street", borough: "Queens" }));
+
+    expect(body.registered_with_hpd).toBe(false);
+    expect(body.hpd_violations).toMatchObject({ total: 0 });
+    expect(body.evictions_executed).toBe(0);
+    expect(String(body.note)).toContain("Tried house-number spellings: 12015, 120-15");
+    expect(String(body.note)).toMatch(/substring/);
+  });
+
+  // The note is for a profile that found nothing, not for a registered
+  // building that is genuinely clean — that one gets no note at all.
+  it("stays quiet when the building resolved but has nothing on file", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW])).mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_profile", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+    expect(body.registered_with_hpd).toBe(true);
+    expect(body.note).toBeUndefined();
+  });
+
+  // Nor for an unregistered building that still has rows somewhere: "No rows
+  // matched" would be a false claim.
+  it("stays quiet when unregistered but violations exist", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([])) // registrations "12015"
+      .mockResolvedValueOnce(jsonResponse([])) // registrations "120-15"
+      .mockResolvedValueOnce(jsonResponse([{ class: "C", n: "3" }])) // violations
+      .mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_profile", { house_number: "12015", street: "Example Street", borough: "Queens" }));
+    expect(body.hpd_violations).toMatchObject({ total: 3 });
+    expect(body.note).toBeUndefined();
+  });
+
   // Same repetition as who_owns: the profile's contacts call must not ship a
   // building's owner list 87 times over.
   it("dedupes the per-building repetition in its contacts section", async () => {

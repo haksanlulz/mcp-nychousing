@@ -2039,6 +2039,25 @@ async function buildingProfile(args: Row): Promise<unknown> {
   });
   const emergencyRepairCharges = num(hwoRows[0]?.n) ?? 0;
 
+  // A profile that found NOTHING anywhere is the silent zero this tool's own
+  // description ("START HERE") makes the most costly: a de-hyphenated outer-
+  // borough number or a misspelled street returns an all-zero profile that
+  // reads as a clean building. resolveBuilding probed the house-number
+  // spellings against the registrations dataset and none matched, so every
+  // other section above was keyed on the literal spelling the caller gave.
+  // emptyBuildingNote names the spellings tried and the substring-matched
+  // street, the same rescue building_violations and building_complaints ship.
+  const foundNothing =
+    registrations.length === 0 &&
+    violations.total === 0 &&
+    complaints.total === 0 &&
+    litigation.total === 0 &&
+    evictionsExecuted === 0 &&
+    aepRows.length === 0 &&
+    vacateRows.length === 0 &&
+    bedbugRows.length === 0 &&
+    emergencyRepairCharges === 0;
+
   return {
     query: {
       house_number: hn,
@@ -2067,7 +2086,12 @@ async function buildingProfile(args: Row): Promise<unknown> {
     emergency_repair_charges: emergencyRepairCharges,
     note: resolved.matchedVariant
       ? `No exact match for "${houseNumberInput}"; the profile uses HPD's stored house number "${hn}" (NYC outer-borough addresses are stored hyphenated, e.g. 120-15).`
-      : undefined,
+      : foundNothing
+        ? emptyBuildingNote(
+            houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" }),
+            street,
+          )
+        : undefined,
     next_steps:
       "Detail tools: building_violations / building_complaints (rows), landlord_litigation (cases), " +
       "eviction_lookup (executed evictions), true_owner (property-record ownership), dob_building " +
