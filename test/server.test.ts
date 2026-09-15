@@ -560,6 +560,53 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
     expect(body.note).toMatch(/107-36/);
   });
 
+  // Stopping at the first match is right for the retry, and it means the rest
+  // went unqueried. Live 2026-09-14 on 3h2n-5cm9, boro='4', street like
+  // '%QUEENS BOULEVARD%': house_number '9015' returns 12 DOB violations and
+  // '90-15' returns 383. Neither matchedVariant note fires there — the spelling
+  // passed IS the one that matched — so the larger set is invisible.
+  it("dob_building says which spellings went unqueried when the literal matched", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([{ violation_category: "V-DOB VIOLATION - ACTIVE", n: "12" }])) // "9015" hits
+      .mockResolvedValueOnce(jsonResponse([{ number: "V1", violation_category: "V-DOB VIOLATION - ACTIVE" }]))
+      .mockResolvedValueOnce(jsonResponse([{ status: "ACTIVE", n: "1" }])) // complaints "9015" hits
+      .mockResolvedValueOnce(jsonResponse([{ complaint_number: "5551", status: "ACTIVE" }]));
+    const body = payload(await call("dob_building", { house_number: "9015", street: "Queens Blvd", borough: "Queens" }));
+
+    // "90-15" was generated and never sent: 2 summaries + 2 detail pages.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(whereOf(0)).toContain("upper(house_number)='9015'");
+    expect(body.violations.total_matching).toBe(12);
+    expect(String(body.note)).toContain("90-15");
+    expect(String(body.note)).toMatch(/NOT queried/);
+    expect(String(body.note)).toMatch(/violations and complaints/);
+  });
+
+  // The note is per section, not per tool: a section that found nothing already
+  // tried every spelling, so naming it would be a false claim.
+  it("dob_building names only the section that stopped early", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([{ violation_category: "V-DOB VIOLATION - ACTIVE", n: "12" }])) // viol "9015" hits
+      .mockResolvedValueOnce(jsonResponse([{ number: "V1", violation_category: "V-DOB VIOLATION - ACTIVE" }]))
+      .mockResolvedValueOnce(jsonResponse([])) // complaints "9015": zero
+      .mockResolvedValueOnce(jsonResponse([])); // complaints "90-15": zero too, so nothing untried
+    const body = payload(await call("dob_building", { house_number: "9015", street: "Queens Blvd", borough: "Queens" }));
+
+    expect(String(body.note)).toMatch(/DOB violations were NOT queried under: 90-15/);
+    expect(String(body.note)).not.toMatch(/violations and complaints were NOT queried/);
+  });
+
+  it("dob_building says nothing about unqueried spellings when there are none", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([{ violation_category: "V-DOB VIOLATION - ACTIVE", n: "4" }]))
+      .mockResolvedValueOnce(jsonResponse([{ number: "V1" }]))
+      .mockResolvedValueOnce(jsonResponse([{ status: "ACTIVE", n: "2" }]))
+      .mockResolvedValueOnce(jsonResponse([{ complaint_number: "5551" }]));
+    // Bronx: only one spelling is generated for a plain number.
+    const body = payload(await call("dob_building", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+    expect(String(body.note)).not.toMatch(/NOT queried/);
+  });
+
   it("building_311 stops at the literal spelling when it already matches", async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse([{ status: "CLOSED", n: "3" }]))

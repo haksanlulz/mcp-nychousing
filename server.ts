@@ -726,18 +726,29 @@ function addressHouseNumberVariants(address: string, opts: { hyphenateDigits?: b
  * (and which spelling won); if none match, returns the first (literal) attempt's
  * result unchanged so the caller still reports the empty result for the
  * spelling the user gave.
+ *
+ * `tried` is the spellings actually queried. Stopping on the first match means
+ * the rest went UNQUERIED, and in a dataset that files one building under more
+ * than one spelling those hold their own rows: live 2026-09-14 on 3h2n-5cm9,
+ * boro='4' and street like '%QUEENS BOULEVARD%', house_number '9015' returns 12
+ * DOB violations and '90-15' returns 383. A caller who typed the de-hyphenated
+ * form gets 12 and, without this, is told nothing. `matchedVariant` cannot
+ * carry that: it is false both when the literal matched and stopped the loop,
+ * and when nothing matched and every spelling was tried.
  */
 async function tryHouseNumberVariants<T>(
   variants: string[],
   probe: (houseNumber: string) => Promise<{ matched: boolean; value: T }>,
-): Promise<{ houseNumber: string; matchedVariant: boolean; value: T }> {
+): Promise<{ houseNumber: string; matchedVariant: boolean; tried: string[]; value: T }> {
   let first: { houseNumber: string; value: T } | undefined;
+  const tried: string[] = [];
   for (const houseNumber of variants) {
+    tried.push(houseNumber);
     const r = await probe(houseNumber);
     if (!first) first = { houseNumber, value: r.value };
-    if (r.matched) return { houseNumber, matchedVariant: houseNumber !== variants[0], value: r.value };
+    if (r.matched) return { houseNumber, matchedVariant: houseNumber !== variants[0], tried, value: r.value };
   }
-  return { houseNumber: first!.houseNumber, matchedVariant: false, value: first!.value };
+  return { houseNumber: first!.houseNumber, matchedVariant: false, tried, value: first!.value };
 }
 
 /**
@@ -2318,6 +2329,28 @@ async function dobBuilding(args: Row): Promise<unknown> {
   }
   if (violSummary.total === 0 && compSummary.total === 0 && variants.length > 1) {
     notes.push(`Both sections read zero. Tried house-number spellings: ${variants.join(", ")}.`);
+  }
+  // The probe stops at the first spelling that matches, so a section that found
+  // rows left the remaining spellings UNQUERIED — and DOB files one building
+  // under more than one, each holding its own rows. Live 2026-09-14 on
+  // 3h2n-5cm9, boro='4', street like '%QUEENS BOULEVARD%': house_number '9015'
+  // returns 12 violations and '90-15' returns 383. Without this, a caller who
+  // typed the de-hyphenated form is shown 12 and told nothing; neither of the
+  // notes above fires, since the spelling passed is the one that matched.
+  const untried = (r: { tried: string[] }) => variants.filter((v) => !r.tried.includes(v));
+  const violUntried = violSummary.total > 0 ? untried(violResolved) : [];
+  const compUntried = compSummary.total > 0 ? untried(compResolved) : [];
+  const unqueried = [...new Set([...violUntried, ...compUntried])];
+  if (unqueried.length) {
+    const sections = [violUntried.length ? "violations" : null, compUntried.length ? "complaints" : null]
+      .filter(Boolean)
+      .join(" and ");
+    notes.push(
+      `The spelling you passed matched, so DOB ${sections} were NOT queried under: ${unqueried.join(", ")}. ` +
+        "DOB files one building under more than one spelling and each holds its own rows, so a small " +
+        "count under a de-hyphenated number can sit beside a much larger one under the hyphenated form " +
+        "(measured: 12 vs 383 on one Queens Boulevard address). Re-run with that spelling to see it.",
+    );
   }
   notes.push(
     "DOB records use the agency's raw formats (dates often YYYYMMDD; complaint categories and " +
