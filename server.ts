@@ -2054,9 +2054,32 @@ async function buildingProfile(args: Row): Promise<unknown> {
   // ending in the same type word ("MORRIS AVENUE EAST") matches, which is why
   // the matched address strings are returned beside the count rather than a
   // bare number the caller cannot audit.
+  //
+  // The caller's `street` is a SUBSTRING match on every HPD-keyed section above
+  // (likeCI("streetname", street)), so "Tremont Avenue" resolves a building HPD
+  // files as EAST TREMONT AVENUE. The eviction anchor is the one section that
+  // is NOT a substring match, and the directional exclusion then read the
+  // building's own registered street as a different one and dropped its rows
+  // -- NYCH-3 with the sign flipped, and a wrong non-zero reads as measured.
+  // Live 2026-09-15 through the generated $where: 1960 "Tremont Avenue" BRONX
+  // (HPD buildingid 73924, 194 violations, registered EAST TREMONT AVENUE)
+  // reported evictions_executed 1 against the registered street's 10; 215
+  // "145 Street" MANHATTAN (buildingid 805976, registered WEST 145 STREET)
+  // reported 0 against 9. foundNothing rescues neither: every other section
+  // is populated.
+  //
+  // When a registration resolved the building, anchor on the street HPD has
+  // on FILE rather than on the fragment the caller typed. Re-measured live:
+  // 1960 -> 10, 215 -> 9, and every regression case holds -- 475 Broadway 0,
+  // 590 Morris Avenue 0, 1650 Ocean Avenue 0, 1500 Grand Avenue 0, 100 Park
+  // Place 0, 1520 / 2763 / 2707 / 3605 SEDGWICK 13 / 8 / 7 / 17, 562 Morris
+  // Avenue 6, 1170 Ocean Avenue 4, 4064 BRONX BLVD 13, 3704 WHITE PLAINS RD
+  // 1, and 424 Broadway (no registration) falls back to the caller's street
+  // and stays at 1.
+  const evictionStreet = str(resolved.registrations[0]?.streetname) ?? street;
   const evictWhere = whereAnd([
     houseNumberAnchored("eviction_address", hn),
-    streetAnchored("eviction_address", street),
+    streetAnchored("eviction_address", evictionStreet),
     inText("borough", boro.evictionAliases),
   ]);
   const evictRows = await sodaGet(DATASET.evictions, {
@@ -2136,6 +2159,10 @@ async function buildingProfile(args: Row): Promise<unknown> {
     // word ("MORRIS AVENUE EAST" under "Morris Avenue") matches — so the rows
     // are shown here rather than hidden inside the number.
     evictions_matched_addresses: evictionAddresses,
+    // Which street spelling the eviction anchor actually used, when it is not
+    // the one passed. The count is unauditable without it.
+    evictions_street_matched:
+      evictionStreet.trim().toUpperCase() === street.trim().toUpperCase() ? undefined : evictionStreet,
     evictions_addresses_truncated: evictionsTruncated || undefined,
     aep: { in_program_history: aepRows.length > 0, records: aepRows.map(normAep) },
     vacate_orders: vacateRows.map(normVacate),
@@ -2224,7 +2251,33 @@ async function trueOwner(args: Row): Promise<unknown> {
     const rows = await sodaGet(DATASET.pluto, {
       $select: "address,bbl,block,lot,ownername,bldgclass,landuse,unitsres,unitstotal,yearbuilt,numfloors,zipcode",
       $where: whereAnd([
-        `upper(address) like '${soqlLike(`${houseNumber} ${street}`.toUpperCase())}%'`,
+        // Prefix, OR the high end of a stored RANGE. PLUTO writes ranges for
+        // multi-lot frontages outside Queens ("29-31 LEONARD STREET", "22-24
+        // DOWNING STREET", "38-40 EAST 76 STREET", "145-125 WHITE STREET"), so
+        // a pure prefix reports found:false on a real lot: live 2026-09-15,
+        // true_owner("31","Leonard Street","Manhattan") returned nothing while
+        // 64uk-42ks holds "29-31 LEONARD STREET", bbl 1001790043, ownername
+        // "31 LEONARD STREET, LLC".
+        //
+        // Queens is excluded from the range arm, and the scoping is the whole
+        // point: a hyphen in a Queens address is part of the house NUMBER, not
+        // a range (live `address like '%-%'`: QN 302,210 rows vs MN 24 / BX 46
+        // / BK 49 / SI 14), so an unscoped arm re-opens the defect this block
+        // closed -- '%-20 QUEENS BOULEVARD%' returns 44-20, 39-20, 32-20,
+        // 66-20, 70-20, 77-20 and no house 20. Outside Queens it is verified
+        // not to: '%-17 SEDGWICK AVENUE%' in BX is still empty.
+        //
+        // Residual: MN's 24 hyphenated rows include "PIER-16 SOUTH STREET" and
+        // "60-A RIVERSIDE BOULEVARD", so the arm can also match a pier or a
+        // lettered sub-lot. Those land in `lots` and
+        // assessor_owner_lot_address names the one the three published fields
+        // describe.
+        (() => {
+          const p = soqlLike(`${houseNumber} ${street}`.toUpperCase());
+          return boro.short === "QN"
+            ? `upper(address) like '${p}%'`
+            : `(upper(address) like '${p}%' OR upper(address) like '%-${p}%')`;
+        })(),
         eqText("borough", boro.short),
       ]),
       $order: "bbl",
@@ -2241,7 +2294,8 @@ async function trueOwner(args: Row): Promise<unknown> {
       found: false,
       note:
         "No PLUTO tax lot matched that address. PLUTO stores one combined address line per lot " +
-        '(e.g. "1520 SEDGWICK AVENUE") and the house number must START it; ' +
+        '(e.g. "1520 SEDGWICK AVENUE") and the house number must START it, or be the high end of a ' +
+        'stored range ("29-31 LEONARD STREET"); ' +
         (plutoResolved.tried.length > 1 ? `tried house-number spellings: ${plutoResolved.tried.join(", ")}. ` : "") +
         "Try the exact street spelling, or a corner building's other street. " +
         "who_owns (HPD registration) may still answer." +

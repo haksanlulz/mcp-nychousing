@@ -1517,6 +1517,27 @@ describe("true_owner", () => {
       expect(whereOf(0)).not.toContain("'%17 SEDGWICK AVENUE%'");
     });
 
+    // PLUTO stores multi-lot frontages outside Queens as a RANGE ("29-31
+    // LEONARD STREET"), where the queried house number is the high end and not
+    // first on the line. A pure prefix reported found:false on a real lot whose
+    // assessor owner is literally "31 LEONARD STREET, LLC" (live 2026-09-15).
+    it("also matches the high end of a stored address range outside Queens", async () => {
+      fetchMock.mockResolvedValue(jsonResponse([]));
+      await call("true_owner", { house_number: "31", street: "Leonard Street", borough: "Manhattan" });
+      expect(whereOf(0)).toContain("upper(address) like '31 LEONARD STREET%'");
+      expect(whereOf(0)).toContain("upper(address) like '%-31 LEONARD STREET%'");
+    });
+
+    // A hyphen in a Queens address is part of the house NUMBER (70-08), not a
+    // range: an unscoped range arm would read 44-20 / 39-20 / 66-20 QUEENS
+    // BOULEVARD onto house 20. Queens stays prefix-only.
+    it("keeps Queens prefix-only, where a hyphen is part of the house number", async () => {
+      fetchMock.mockResolvedValue(jsonResponse([]));
+      await call("true_owner", { house_number: "20", street: "Queens Boulevard", borough: "Queens" });
+      expect(whereOf(0)).toContain("upper(address) like '20 QUEENS BOULEVARD%'");
+      expect(whereOf(0)).not.toContain("'%-20 QUEENS BOULEVARD%'");
+    });
+
     // Socrata's default ordering is unspecified and lots[0] decides
     // assessor_owner, latest_deed and speculation_watch.
     it("orders the lot page so lots[0] is not arbitrary", async () => {
@@ -1825,6 +1846,41 @@ describe("building_profile", () => {
       expect(w).toContain("upper(eviction_address) like '%SEDGWICK AV%'");
       expect(w).not.toContain("2763 SEDGWICK AVENUE");
       expect(w).toContain("borough in ('BRONX')");
+    });
+
+    // Every HPD section matches the caller's street as a SUBSTRING, so
+    // "Tremont Avenue" resolves a building registered as EAST TREMONT AVENUE.
+    // The eviction anchor is exact on the distinctive token, so it must use the
+    // street HPD has on FILE, or the directional exclusion drops the building's
+    // own rows (live 2026-09-15: 1960 Tremont Avenue read 1 where the
+    // registered street returns 10).
+    it("anchors evictions on the registered street when the caller typed a fragment of it", async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse([{ ...REGISTRATION_ROW, streetname: "EAST TREMONT AVENUE" }]))
+        .mockResolvedValueOnce(jsonResponse([])) // contacts
+        .mockResolvedValueOnce(jsonResponse([])) // violations
+        .mockResolvedValueOnce(jsonResponse([])) // complaints
+        .mockResolvedValueOnce(jsonResponse([])) // litigation
+        .mockResolvedValueOnce(jsonResponse([{ eviction_address: "1960 EAST TREMONT AVENUE", n: "6" }]))
+        .mockResolvedValueOnce(jsonResponse([{ n: "10" }]))
+        .mockResolvedValue(jsonResponse([]));
+      const body = payload(await call("building_profile", { house_number: "1960", street: "Tremont Avenue", borough: "Bronx" }));
+
+      expect(body.evictions_executed).toBe(10);
+      expect(body.evictions_street_matched).toBe("EAST TREMONT AVENUE");
+      const w = whereOf(5);
+      expect(w).toContain("upper(eviction_address) like '1960-%'");
+      expect(w).toContain("TREMONT");
+      // Anchored on HPD's spelling, so its own directional is not excluded.
+      expect(w).not.toMatch(/not like '%EAST TREMONT/i);
+    });
+
+    it("omits evictions_street_matched when the caller's street is the registered one", async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW])) // SEDGWICK AVENUE
+        .mockResolvedValue(jsonResponse([]));
+      const body = payload(await call("building_profile", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+      expect(body.evictions_street_matched).toBeUndefined();
     });
 
     // The grouped address page stops at EVICTION_ADDRESS_CAP distinct
