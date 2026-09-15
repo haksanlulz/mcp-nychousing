@@ -1549,7 +1549,7 @@ describe("building_profile", () => {
       // what separates Ocean Avenue from Ocean Parkway.
       expect(w).toContain("upper(eviction_address) like '% OCEAN %'");
       expect(w).not.toContain("like '%OCEAN%'");
-      expect(w).toContain("upper(eviction_address) like '%AV%'");
+      expect(w).toContain("upper(eviction_address) like '%OCEAN AV%'");
       // A street with no type word carries no stem condition at all.
       expect(__test.streetAnchored("eviction_address", "Grand Concourse")).toBe(
         "(upper(eviction_address) like 'GRAND CONCOURSE %'" +
@@ -1557,8 +1557,33 @@ describe("building_profile", () => {
           " OR upper(eviction_address) like '% GRAND CONCOURSE'" +
           " OR upper(eviction_address) like 'GRAND CONCOURSE')",
       );
-      // A wildcard in the caller's input stays literal.
-      expect(__test.streetAnchored("eviction_address", "A%B Street")).toContain("'A\\%B %'");
+      // A wildcard in the caller's input stays literal, on both arms.
+      const esc = __test.streetAnchored("eviction_address", "A%B Street");
+      expect(esc).toContain("'A\\%B %'");
+      expect(esc).toContain("'%A\\%B ST%'");
+    });
+
+    // The stem must be the NEXT token, not merely present. A street whose name
+    // is a prefix of a longer street in the same borough carries the stem
+    // anyway: live 2026-09-14, with the stem free-floating, "590 MORRIS PARK
+    // AVE" was 590 MORRIS AVENUE's only executed eviction and "632 MORRIS PARK
+    // AVENUE" was 632's only one, both HPD-registered Bronx buildings.
+    it("does not accept a type stem that belongs to a longer street name (unit)", () => {
+      const w = __test.streetAnchored("eviction_address", "Morris Avenue");
+      expect(w).not.toContain("upper(eviction_address) like '%AV%'");
+      expect(w).toContain("upper(eviction_address) like '%MORRIS AV%'");
+    });
+
+    // The column stores runs of spaces between tokens ("3605 SEDGWICK    AVE
+    // NUE"), and SoQL LIKE has no "one or more spaces" quantifier, so the runs
+    // are enumerated rather than matched. Dropping the multi-space arms takes
+    // 3605 Sedgwick Avenue from 17 executed evictions to 14.
+    it("enumerates the space runs the column stores between tokens (unit)", () => {
+      const w = __test.streetAnchored("eviction_address", "Sedgwick Avenue");
+      for (const gap of [" ", "  ", "   ", "    ", "     ", "      ", "       ", "        "]) {
+        expect(w).toContain(`upper(eviction_address) like '%SEDGWICK${gap}AV%'`);
+      }
+      expect(w).not.toContain("like '%SEDGWICK         AV%'"); // 9 spaces: bounded
     });
 
     // The abbreviation is not always a prefix of the caller's word. Taking the
@@ -1566,17 +1591,17 @@ describe("building_profile", () => {
     // "3704 WHITE PLAINS RD"; live 2026-09-14, 4064 Bronx Boulevard drops from
     // 13 executed evictions to 0 under that rule.
     it("accepts the stored abbreviation for each type family (unit)", () => {
-      const cases: [string, string][] = [
-        ["White Plains Road", "RD"],
-        ["Bronx Boulevard", "BL"],
-        ["Santa Monica Lane", "LN"],
-        ["Lynn Court", "CT"],
-        ["Crotona Parkway", "PK"],
-        ["Kings Highway", "HW"],
+      const cases: [string, string, string][] = [
+        ["White Plains Road", "WHITE PLAINS", "RD"],
+        ["Bronx Boulevard", "BRONX", "BL"],
+        ["Santa Monica Lane", "SANTA MONICA", "LN"],
+        ["Lynn Court", "LYNN", "CT"],
+        ["Crotona Parkway", "CROTONA", "PK"],
+        ["Kings Highway", "KINGS", "HW"],
       ];
-      for (const [street, abbrevStem] of cases) {
+      for (const [street, dist, abbrevStem] of cases) {
         expect(__test.streetAnchored("eviction_address", street)).toContain(
-          `upper(eviction_address) like '%${abbrevStem}%'`,
+          `upper(eviction_address) like '%${dist} ${abbrevStem}%'`,
         );
       }
     });
@@ -1611,7 +1636,7 @@ describe("building_profile", () => {
       // The street side is anchored too, so the distinctive token cannot match
       // inside a longer word, and a stem of the type word must appear.
       expect(w).not.toContain("upper(eviction_address) like '%SEDGWICK%'");
-      expect(w).toContain("upper(eviction_address) like '%AV%'");
+      expect(w).toContain("upper(eviction_address) like '%SEDGWICK AV%'");
       expect(w).not.toContain("2763 SEDGWICK AVENUE");
       expect(w).toContain("borough in ('BRONX')");
     });
@@ -1669,8 +1694,24 @@ describe("building_profile", () => {
       const w = whereOfDataset(EVICTIONS_DATASET);
       expect(w).not.toContain("upper(eviction_address) like '%OCEAN%'");
       expect(w).toContain("upper(eviction_address) like '% OCEAN %'");
-      expect(w).toContain("upper(eviction_address) like '%AV%'");
+      expect(w).toContain("upper(eviction_address) like '%OCEAN AV%'");
       expect(w).toContain("borough in ('BROOKLYN','KINGS')");
+    });
+
+    // The residual of the case above: bounding the distinctive token is not
+    // enough when the OTHER street's name extends this one. "590 MORRIS PARK
+    // AVE" clears '% MORRIS %' and carries AV, and live 2026-09-14 it was the
+    // only executed eviction the profile reported for 590 Morris Avenue, Bronx
+    // (buildingid 97665). 632 the same; 562 Morris Avenue read 7 where 6 are
+    // its own. Requiring the stem to FOLLOW the token takes those to 0/0/6.
+    it("does not read a longer street name's evictions onto this building", async () => {
+      fetchMock.mockResolvedValue(jsonResponse([]));
+      await call("building_profile", { house_number: "590", street: "Morris Avenue", borough: "Bronx" });
+      const w = whereOfDataset(EVICTIONS_DATASET);
+      expect(w).toContain("upper(eviction_address) like '% MORRIS %'");
+      expect(w).toContain("upper(eviction_address) like '%MORRIS AV%'");
+      // The free-floating stem is what matched "590 MORRIS PARK AVE".
+      expect(w).not.toContain("upper(eviction_address) like '%AV%'");
     });
   });
 

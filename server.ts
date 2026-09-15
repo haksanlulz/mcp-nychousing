@@ -495,8 +495,9 @@ function streetTypeWord(street: string): string | null {
 /**
  * The street, anchored the way houseNumberAnchored anchors the number: the
  * distinctive token sits on a word boundary, and when the caller's street
- * carried a generic type word, a stem of that word appears somewhere in the
- * line (or the line ends on the distinctive token, i.e. stores no type word).
+ * carried a generic type word, a stem of that word FOLLOWS the distinctive
+ * token with nothing but spaces between (or the line ends on the distinctive
+ * token, i.e. stores no type word).
  *
  * A bare '%<distinctive>%' reads another street's evictions onto this building.
  * Measured live 2026-09-14 against 6z8x-wfk4: house 1650 on OCEAN AVENUE in
@@ -505,18 +506,33 @@ function streetTypeWord(street: string): string | null {
  * 6 where 4 are its own; 100 PARK PLACE returned 4, none on Park Place (two at
  * 100 OCEAN PARKWAY, two matching PARKING inside an apartment descriptor);
  * 1500 GRAND AVENUE in the Bronx returned 4, all at 1500 GRAND CONCOURSE.
- * Anchored, each of those is 0, while the README's worked example (1520
- * SEDGWICK AVENUE) still returns 13 and 2763 / 2707 / 3605 still return
- * 8 / 7 / 17 — the "2763-69" range, the "155B KINGSBRIDGE RD A/K/A 2707
- * SEDGWICK AVENUE" form and the mangled "3605 SEDGWICK    AVE NUE" included.
  *
- * The stem is not required to be adjacent to the distinctive token, because the
- * column both abbreviates and mangles the type word ("AVE NUE", "AVEN UE") and
- * puts runs of spaces between tokens.
+ * Bounding the distinctive token is necessary and NOT sufficient: a street whose
+ * name is a PREFIX of a longer street in the same borough carries the type stem
+ * somewhere in the line anyway. Live 2026-09-14, with the distinctive token
+ * bounded but the stem free-floating, "590 MORRIS PARK AVE" was 590 MORRIS
+ * AVENUE's only executed eviction, "632 MORRIS PARK AVENUE" was 632's only one,
+ * and 562 MORRIS AVENUE read 7 where 6 are its own — three HPD-registered Bronx
+ * buildings (buildingid 97665 / 97675 / 97662). Requiring the stem to follow the
+ * distinctive token takes those to 0 / 0 / 6, while every regression case holds:
+ * 1520 / 2763 / 2707 / 3605 SEDGWICK stay at 13 / 8 / 7 / 17 (the "2763-69"
+ * range, the "155B KINGSBRIDGE RD A/K/A 2707 SEDGWICK AVENUE" form and the
+ * mangled "3605 SEDGWICK    AVE NUE" included), 4064 BRONX BLVD stays 13,
+ * 3704 WHITE PLAINS RD stays 1, 1170 OCEAN AVENUE stays 4, and 1650 OCEAN /
+ * 100 PARK PLACE / 1500 GRAND AVENUE stay 0.
+ *
+ * The stem is not required to be ADJACENT in the abbreviation sense — the column
+ * both abbreviates and mangles the type word ("AVE NUE", "AVEN UE"), which the
+ * two-letter stem already covers — but it must be the next token. SoQL LIKE has
+ * no "one or more spaces" quantifier and the column stores runs of them
+ * ("SEDGWICK    AVE NUE"), so the runs are enumerated; 8 is above the longest
+ * run measured in 6z8x-wfk4.
  *
  * Residual: house number and street are independent conditions on one free-text
  * line, so a row naming two addresses (A/K/A) can still be attributed to either.
  */
+const STREET_TYPE_GAPS = [" ", "  ", "   ", "    ", "     ", "      ", "       ", "        "];
+
 function streetAnchored(col: string, street: string): string {
   const dist = soqlLike(streetDistinctive(street));
   const boundary = [`'${dist} %'`, `'% ${dist} %'`, `'% ${dist}'`, `'${dist}'`]
@@ -524,9 +540,10 @@ function streetAnchored(col: string, street: string): string {
     .join(" OR ");
   const type = streetTypeWord(street);
   if (!type) return `(${boundary})`;
-  const arms = (STREET_TYPE_STEMS.get(type) ?? []).map(
-    (stem) => `upper(${col}) like '%${soqlLike(stem)}%'`,
-  );
+  const arms: string[] = [];
+  for (const stem of STREET_TYPE_STEMS.get(type) ?? []) {
+    for (const gap of STREET_TYPE_GAPS) arms.push(`upper(${col}) like '%${dist}${gap}${soqlLike(stem)}%'`);
+  }
   // No type word stored at all ("68 WEST 238TH STRE ET AKA 3605 SEDGWICK"):
   // the line ending on the distinctive token is not some other street.
   arms.push(`upper(${col}) like '% ${dist}'`, `upper(${col}) like '${dist}'`);
@@ -1959,14 +1976,16 @@ async function buildingProfile(args: Row): Promise<unknown> {
   // there is a clean bill of health on a building with executed evictions.
   //
   // Anchor BOTH axes on a token boundary: the house number, and the street's
-  // distinctive token plus a stem of its type word. That matches the stored
-  // range and mangled spellings without reading another building's rows onto
-  // this one. A bare '%<distinctive>%' on the street side is not a smaller
-  // version of the same widening: it reported 1650 OCEAN PARKWAY's three
-  // executed evictions as 1650 Ocean Avenue's (see streetAnchored). It is still
-  // wider than an exact match ("SEDGWICK" also matches "SEDGWICK TERRACE"),
-  // which is why the matched address strings are returned beside the count
-  // rather than a bare number the caller cannot audit.
+  // distinctive token followed by a stem of its type word. That matches the
+  // stored range and mangled spellings without reading another building's rows
+  // onto this one. Neither half of the street anchor is optional — a bare
+  // '%<distinctive>%' reported 1650 OCEAN PARKWAY's three executed evictions as
+  // 1650 Ocean Avenue's, and bounding the token while letting the stem float
+  // free reported 590 MORRIS PARK AVE's as 590 Morris Avenue's (see
+  // streetAnchored). It is still wider than an exact match: a longer street
+  // ending in the same type word ("MORRIS AVENUE EAST") matches, which is why
+  // the matched address strings are returned beside the count rather than a
+  // bare number the caller cannot audit.
   const evictWhere = whereAnd([
     houseNumberAnchored("eviction_address", hn),
     streetAnchored("eviction_address", street),
@@ -2025,9 +2044,10 @@ async function buildingProfile(args: Row): Promise<unknown> {
     hpd_complaints: { total: complaints.total, by_status: complaints.by },
     hpd_litigation: { total: litigation.total, by_status: litigation.by },
     evictions_executed: evictionsExecuted,
-    // The stored spellings behind the count. The house number is anchored but
-    // the street is a substring match, so a wider hit (SEDGWICK also matching
-    // SEDGWICK TERRACE) is visible here rather than hidden inside the number.
+    // The stored spellings behind the count. Both axes are anchored, but the
+    // match is still wider than exact — a longer street ending in the same type
+    // word ("MORRIS AVENUE EAST" under "Morris Avenue") matches — so the rows
+    // are shown here rather than hidden inside the number.
     evictions_matched_addresses: evictionAddresses,
     evictions_addresses_truncated: evictionsTruncated || undefined,
     aep: { in_program_history: aepRows.length > 0, records: aepRows.map(normAep) },
