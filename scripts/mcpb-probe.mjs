@@ -111,7 +111,17 @@ try {
   ok("entry_point is the file mcp_config launches");
   const env = { ...process.env };
   for (const [k, v] of Object.entries(shipped.server.mcp_config.env ?? {})) env[k] = subst(v);
-  delete env.NYC_APP_TOKEN; // unset, as a user who skipped the optional field leaves it
+  // NOT deleted. mcp_config.env holds exactly one key here,
+  // NYC_APP_TOKEN=${user_config.app_token}, so deleting it cancelled the loop
+  // above and launched the server with no token variable at all — skipping the
+  // one case the server's "${" guard exists for, a host passing the
+  // unsubstituted template for a field the user left blank. Nothing else in the
+  // repo exercises that launch path (test/server.test.ts pins the header
+  // behavior, not the startup).
+  if (!String(env.NYC_APP_TOKEN ?? "").includes("${")) {
+    fail(`expected the unsubstituted user_config template in NYC_APP_TOKEN, got ${JSON.stringify(env.NYC_APP_TOKEN)}`);
+  }
+  ok("launching with the unsubstituted user_config template, as a host does for a skipped field");
 
   // No shell: the command is plain `node` with file-path arguments, so a shell
   // buys nothing and costs two things on Windows, where this is a local rung as
@@ -120,6 +130,20 @@ try {
   // shell: true, so a temp path containing a space would break the launch and
   // be reported as a defect in the bundle. (The npm calls above still need one.)
   child = spawn(shipped.server.mcp_config.command, args, { stdio: ["pipe", "pipe", "pipe"], cwd: unpacked, env });
+  // A ChildProcess 'error' with no listener (ENOENT on the command, EPIPE on
+  // writing to a dead stdin) is an UNCAUGHT EXCEPTION, not a rejection: it
+  // escapes this try, so the finally below never runs and the staging tree —
+  // a full production node_modules plus the packed bundle — leaks again, which
+  // is the same failure replacing process.exit() with a throw closed on the
+  // other path. It would also report as a Node stack trace rather than a FAIL
+  // line. Recorded and raised after the handshake, so the stderr collected
+  // below is still available to explain it.
+  let spawnError = null;
+  const noteSpawnError = (e) => {
+    spawnError ??= e;
+  };
+  child.on("error", noteSpawnError);
+  child.stdin.on("error", noteSpawnError);
   let out = "";
   let err = "";
   child.stdout.on("data", (d) => (out += d));
@@ -155,6 +179,7 @@ try {
   const init = msgs.find((m) => m.id === 1);
   const tools = msgs.find((m) => m.id === 2);
 
+  if (spawnError) fail(`the bundled server could not be run: ${spawnError.message}. stderr: ${err.slice(0, 500)}`);
   if (!init?.result) fail(`no initialize response from the bundled server. stderr: ${err.slice(0, 500)}`);
   ok(`initialize -> ${init.result.serverInfo?.name}@${init.result.serverInfo?.version}`);
   if (init.result.serverInfo?.version !== manifest.version) {
