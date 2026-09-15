@@ -2577,6 +2577,29 @@ async function building311(args: Row): Promise<unknown> {
   if (resolved.matchedVariant) {
     notes.push(`No rows under "${address}"; matched 311's stored address "${matchedAddress}".`);
   }
+  // dob_building's sibling, and it had the same blind spot: the probe stops at
+  // the first spelling that matched, so the rest were never sent, and neither
+  // note here fires -- matchedVariant needs the literal to have FAILED and the
+  // zero note needs a zero. Rows are keyed on the literal stored string and do
+  // not cross spellings (live 2026-09-15: "107-36 QUEENS BOULEVARD" has 27 heat
+  // rows in Queens and "10736 QUEENS BOULEVARD" has 0), and 311 stores both
+  // forms -- the zero note below cites 2,253 Bronx / 725 Manhattan / 205
+  // Brooklyn hyphenated rows, while a live group-by on erm2-nwe9 returns
+  // unhyphenated stored forms such as "34 59 AVENUE" and "23 21 ROAD". Unlike
+  // DOB (12 vs 383 on one Queens Boulevard address) no 311 building was found
+  // holding rows under BOTH spellings, so this says what was not QUERIED and
+  // does not claim what it would return.
+  if (total > 0) {
+    const untriedSpellings = variants.filter((v) => !resolved.tried.includes(v));
+    if (untriedSpellings.length) {
+      notes.push(
+        `The probe stopped at "${matchedAddress}", so these address spellings were NOT queried: ` +
+          `${untriedSpellings.join(", ")}. 311 stores outer-borough addresses both hyphenated and ` +
+          "de-hyphenated and a row is only returned under the spelling it is stored with, so re-run " +
+          "with that spelling to see whether it holds any of its own.",
+      );
+    }
+  }
   if (total === 0) {
     // Splitting a plain number into a hyphenated one is generated for QUEENS
     // only, because rewriting a plain number elsewhere would point at an

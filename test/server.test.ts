@@ -639,9 +639,25 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse([{ status: "CLOSED", n: "3" }]))
       .mockResolvedValueOnce(jsonResponse([]));
-    await call("building_311", { address: "10736 Queens Boulevard", borough: "Queens" });
+    const body = payload(await call("building_311", { address: "10736 Queens Boulevard", borough: "Queens" }));
     // Summary + detail only: no second spelling is probed once the first hits.
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // ...and stopping there is exactly why it has to say so. Neither of the
+    // other notes fires here: matchedVariant needs the literal to have FAILED
+    // and the zero note needs a zero.
+    expect(String(body.note)).toContain('The probe stopped at "10736 Queens Boulevard"');
+    expect(String(body.note)).toContain("NOT queried: 107-36 Queens Boulevard");
+  });
+
+  // A one-variant address has nothing unqueried, so the note must stay silent
+  // rather than name an empty list.
+  it("building_311 says nothing about unqueried spellings when there are none", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([{ status: "CLOSED", n: "3" }]))
+      .mockResolvedValueOnce(jsonResponse([]));
+    const body = payload(await call("building_311", { address: "1520 Sedgwick Avenue", borough: "Bronx" }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(body.note ?? "")).not.toContain("NOT queried");
   });
 
   // Outside Queens only ONE spelling is generated, so the zero note is the
