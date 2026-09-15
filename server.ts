@@ -2468,14 +2468,25 @@ async function dobBuilding(args: Row): Promise<unknown> {
   const compUntried = compSummary.total > 0 ? untried(compResolved) : [];
   const unqueried = [...new Set([...violUntried, ...compUntried])];
   if (unqueried.length) {
-    const sections = [violUntried.length ? "violations" : null, compUntried.length ? "complaints" : null]
-      .filter(Boolean)
-      .join(" and ");
+    // NOT "the spelling you passed matched": houseNumberVariants("120 15") is
+    // ["120 15", "120-15", "12015"], so the loop can stop on the SECOND, leaving
+    // the third unqueried while matchedVariant is true -- and the matchedVariant
+    // note above then says, in this same string, that the passed spelling did
+    // not match. Name the spelling that actually stopped each probe; the two
+    // sections are probed independently and can stop on different ones.
+    const parts: string[] = [];
+    if (violUntried.length) {
+      parts.push(`violations stopped at "${violResolved.houseNumber}", leaving ${violUntried.join(", ")}`);
+    }
+    if (compUntried.length) {
+      parts.push(`complaints stopped at "${compResolved.houseNumber}", leaving ${compUntried.join(", ")}`);
+    }
     notes.push(
-      `The spelling you passed matched, so DOB ${sections} were NOT queried under: ${unqueried.join(", ")}. ` +
+      `The probe stops at the first spelling that matches, so these were never sent — ${parts.join("; ")}. ` +
         "DOB files one building under more than one spelling and each holds its own rows, so a small " +
         "count under a de-hyphenated number can sit beside a much larger one under the hyphenated form " +
-        "(measured: 12 vs 383 on one Queens Boulevard address). Re-run with that spelling to see it.",
+        "(measured live: 12 under \"9015\" vs 383 under \"90-15\" on Queens Boulevard). Re-run with " +
+        "that spelling to see it.",
     );
   }
   notes.push(

@@ -578,8 +578,9 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
     expect(whereOf(0)).toContain("upper(house_number)='9015'");
     expect(body.violations.total_matching).toBe(12);
     expect(String(body.note)).toContain("90-15");
-    expect(String(body.note)).toMatch(/NOT queried/);
-    expect(String(body.note)).toMatch(/violations and complaints/);
+    expect(String(body.note)).toMatch(/never sent/);
+    expect(String(body.note)).toMatch(/violations stopped at "9015", leaving 90-15/);
+    expect(String(body.note)).toMatch(/complaints stopped at "9015", leaving 90-15/);
   });
 
   // The note is per section, not per tool: a section that found nothing already
@@ -592,8 +593,8 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
       .mockResolvedValueOnce(jsonResponse([])); // complaints "90-15": zero too, so nothing untried
     const body = payload(await call("dob_building", { house_number: "9015", street: "Queens Blvd", borough: "Queens" }));
 
-    expect(String(body.note)).toMatch(/DOB violations were NOT queried under: 90-15/);
-    expect(String(body.note)).not.toMatch(/violations and complaints were NOT queried/);
+    expect(String(body.note)).toMatch(/violations stopped at "9015", leaving 90-15/);
+    expect(String(body.note)).not.toMatch(/complaints stopped at/);
   });
 
   it("dob_building says nothing about unqueried spellings when there are none", async () => {
@@ -604,7 +605,34 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
       .mockResolvedValueOnce(jsonResponse([{ complaint_number: "5551" }]));
     // Bronx: only one spelling is generated for a plain number.
     const body = payload(await call("dob_building", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
-    expect(String(body.note)).not.toMatch(/NOT queried/);
+    expect(String(body.note)).not.toMatch(/never sent/);
+  });
+
+  // A separator-bearing Queens input generates THREE spellings
+  // (houseNumberVariants("120 15") -> ["120 15", "120-15", "12015"]), so the
+  // probe can stop on the SECOND and leave the third unqueried while
+  // matchedVariant is true. The note used to open "The spelling you passed
+  // matched" in exactly that case, contradicting the matchedVariant note joined
+  // into the same string two branches above.
+  it("dob_building names the spelling that stopped the probe, not the one passed", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([])) // violations "120 15": zero
+      .mockResolvedValueOnce(jsonResponse([{ violation_category: "V-DOB VIOLATION - ACTIVE", n: "7" }])) // "120-15" hits
+      .mockResolvedValueOnce(jsonResponse([{ number: "V1" }])) // violation detail
+      .mockResolvedValueOnce(jsonResponse([])) // complaints "120 15": zero
+      .mockResolvedValueOnce(jsonResponse([{ status: "ACTIVE", n: "2" }])) // "120-15" hits
+      .mockResolvedValueOnce(jsonResponse([{ complaint_number: "5551" }])); // complaint detail
+    const body = payload(await call("dob_building", { house_number: "120 15", street: "Queens Blvd", borough: "Queens" }));
+    const note = String(body.note);
+
+    // "12015" is the third variant and was never sent.
+    expect(whereOf(0)).toContain("upper(house_number)='120 15'");
+    expect(whereOf(1)).toContain("upper(house_number)='120-15'");
+    expect(note).toMatch(/violations stopped at "120-15", leaving 12015/);
+    expect(note).toMatch(/complaints stopped at "120-15", leaving 12015/);
+    // The two halves of the note must not contradict each other.
+    expect(note).toMatch(/No DOB violations under "120 15"/);
+    expect(note).not.toMatch(/spelling you passed matched/);
   });
 
   it("building_311 stops at the literal spelling when it already matches", async () => {
