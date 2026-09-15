@@ -1436,10 +1436,15 @@ describe("true_owner", () => {
     // in BX comes back "2028800017.00000000"). A BBL with a decimal tail is
     // not the identifier a caseworker can paste into ACRIS or DOF.
     expect(body.lots[0].bbl).toBe("2032870050");
-    // PLUTO is queried with the 2-letter borough code and a combined-address LIKE.
+    // PLUTO is queried with the 2-letter borough code and a PREFIX-anchored
+    // combined-address LIKE (see the anchoring block below).
     expect(urlOf(0).pathname).toContain("64uk-42ks.json");
     expect(whereOf(0)).toContain("borough='BX'");
-    expect(whereOf(0)).toContain("upper(address) like '%1520 SEDGWICK AVENUE%'");
+    expect(whereOf(0)).toContain("upper(address) like '1520 SEDGWICK AVENUE%'");
+    expect(whereOf(0)).not.toContain("like '%1520 SEDGWICK AVENUE%'");
+    // Three published fields are read off lots[0], so the lot they describe is
+    // named rather than left to be inferred from the array.
+    expect(body.assessor_owner_lot_address).toBe("1520 SEDGWICK AVENUE");
     // ACRIS legals by borough/block/lot as quoted text.
     expect(urlOf(1).pathname).toContain("8h5j-fqxa.json");
     expect(whereOf(1)).toContain("borough='2'");
@@ -1451,6 +1456,53 @@ describe("true_owner", () => {
     expect(body.acris_documents[0].party_2).toEqual(["WFHA 1520 SEDGWICK LP"]);
     expect(body.speculation_watch).toHaveLength(1);
     expect(body).toHaveProperty("record_scope");
+  });
+
+  // PLUTO's address line ALWAYS begins with the house number, so a free
+  // substring reads a different building's lot. Live 2026-09-15 against
+  // 64uk-42ks: '%17 SEDGWICK AVENUE%' with borough='BX' returns 3817 SEDGWICK
+  // AVENUE and 2817 SEDGWICK AVENUE -- nothing at house 17 -- and the tool
+  // published lots[0]'s owner ("TSAI, YU-CHI") as assessor_owner and chased
+  // that lot's deed. '%20 QUEENS BOULEVARD%' returns five lots (114-20, 118-20,
+  // 77-20, 109-20, 104-20), none of them house 20.
+  describe("address anchoring", () => {
+    it("anchors the house number to the START of PLUTO's address line", async () => {
+      fetchMock.mockResolvedValue(jsonResponse([]));
+      await call("true_owner", { house_number: "17", street: "Sedgwick Avenue", borough: "Bronx" });
+      expect(whereOf(0)).toContain("upper(address) like '17 SEDGWICK AVENUE%'");
+      expect(whereOf(0)).not.toContain("'%17 SEDGWICK AVENUE%'");
+    });
+
+    // Socrata's default ordering is unspecified and lots[0] decides
+    // assessor_owner, latest_deed and speculation_watch.
+    it("orders the lot page so lots[0] is not arbitrary", async () => {
+      fetchMock.mockResolvedValue(jsonResponse([]));
+      await call("true_owner", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" });
+      expect(urlOf(0).searchParams.get("$order")).toBe("bbl");
+    });
+
+    // PLUTO stores outer-borough numbers hyphenated (live, "70-08 QUEENS
+    // BOULEVARD"), so "7008 Queens Boulevard" read found:false on a real lot.
+    it("probes hyphenated house-number spellings before reporting a miss", async () => {
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse([])) // "7008 QUEENS BOULEVARD%" -> nothing
+        .mockResolvedValueOnce(jsonResponse([{ ...PLUTO_ROW, address: "70-08 QUEENS BOULEVARD" }]))
+        .mockResolvedValue(jsonResponse([]));
+      const body = payload(await call("true_owner", { house_number: "7008", street: "Queens Boulevard", borough: "Queens" }));
+      expect(body.found).toBe(true);
+      expect(whereOf(0)).toContain("upper(address) like '7008 QUEENS BOULEVARD%'");
+      expect(whereOf(1)).toContain("upper(address) like '70-08 QUEENS BOULEVARD%'");
+      expect(body.query.house_number_searched).toBe("70-08");
+      expect(String(body.note)).toContain("70-08");
+    });
+
+    it("names the spellings it tried when every one misses", async () => {
+      fetchMock.mockResolvedValue(jsonResponse([]));
+      const body = payload(await call("true_owner", { house_number: "7008", street: "Nowhere", borough: "Queens" }));
+      expect(body.found).toBe(false);
+      expect(String(body.note)).toContain("tried house-number spellings: 7008, 70-08");
+      expect(String(body.note)).toContain("must START it");
+    });
   });
 
   it("Staten Island skips ACRIS entirely and says why", async () => {

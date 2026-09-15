@@ -1289,12 +1289,20 @@ const TOOLS: Tool[] = [
       "mortgages with their named parties (ACRIS), and any Speculation Watch List hit (a qualifying " +
       "flip-risk purchase). Complements who_owns: HPD registration says who the landlord TOLD HPD " +
       "they are; this says what the property record shows. Give the house number, street, and " +
-      "borough. NOTE: ACRIS covers Manhattan, Bronx, Brooklyn, and Queens; Staten Island deeds are " +
-      "recorded with the Richmond County Clerk and will not appear. Keyless.",
+      "borough. PLUTO stores ONE combined address line per tax lot and it is matched from the house " +
+      "number forward, so a corner or multi-lot building can return more than one lot; " +
+      "assessor_owner, latest_deed and speculation_watch all describe the FIRST one, named in " +
+      "assessor_owner_lot_address. NOTE: ACRIS covers Manhattan, Bronx, Brooklyn, and Queens; " +
+      "Staten Island deeds are recorded with the Richmond County Clerk and will not appear. Keyless.",
     inputSchema: {
       type: "object",
       properties: {
-        house_number: { type: "string", description: 'Building house number, e.g. "1520".' },
+        house_number: {
+          type: "string",
+          description:
+            'Building house number, e.g. "1520". Must be the start of PLUTO\'s address line; ' +
+            "hyphenated and de-hyphenated outer-borough spellings are both tried.",
+        },
         street: { type: "string", description: "Street name (matched case-insensitively as a substring)." },
         borough: { type: "string", description: BOROUGH_DESC },
         docs_limit: { type: "integer", description: "Max recent ACRIS documents to return (1-25, default 8)." },
@@ -2191,13 +2199,40 @@ async function trueOwner(args: Row): Promise<unknown> {
   const docsLimit = Math.max(1, Math.min(25, Math.floor(num(args.docs_limit) ?? 8)));
 
   // PLUTO stores one combined address ("1520 SEDGWICK AVENUE") and the 2-letter
-  // borough code. Substring-match the address; return every matching lot but
-  // chain ACRIS off the first.
-  const plutoRows = await sodaGet(DATASET.pluto, {
-    $select: "address,bbl,block,lot,ownername,bldgclass,landuse,unitsres,unitstotal,yearbuilt,numfloors,zipcode",
-    $where: whereAnd([likeCI("address", `${houseNumberInput} ${street}`), eqText("borough", boro.short)]),
-    $limit: 5,
+  // borough code, and that line ALWAYS begins with the house number -- so anchor
+  // on the PREFIX. A bare '%<hn> <street>%' is the defect houseNumberAnchored's
+  // docstring already names, and it was still open here. Live 2026-09-15:
+  // '%17 SEDGWICK AVENUE%' with borough='BX' returns 3817 SEDGWICK AVENUE and
+  // 2817 SEDGWICK AVENUE -- nothing at house 17 -- and the tool published
+  // lots[0]'s owner ("TSAI, YU-CHI", a named individual) as assessor_owner and
+  // chased THAT lot's ACRIS deed and speculation-watch row. '%20 QUEENS
+  // BOULEVARD%' is worse: five lots, 114-20 / 118-20 / 77-20 / 109-20 / 104-20,
+  // none of them house 20. latest_deed carries no address of its own, so the
+  // substitution is invisible in the field read as the answer.
+  //
+  // Socrata's default ordering is unspecified -- the ACRIS legals read below
+  // passes $order for exactly this reason -- and lots[0] decides three published
+  // fields, so this page is ordered too.
+  //
+  // The spelling probe rides here for the same reason it does in the HPD- and
+  // DOB-keyed tools: PLUTO stores outer-borough house numbers hyphenated (live,
+  // "70-08 QUEENS BOULEVARD"), so "7008 Queens Boulevard" read found:false on a
+  // real lot while the note offered only "the exact street spelling, or a corner
+  // building's other street" -- never hyphenation.
+  const plutoVariants = houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" });
+  const plutoResolved = await tryHouseNumberVariants(plutoVariants, async (houseNumber) => {
+    const rows = await sodaGet(DATASET.pluto, {
+      $select: "address,bbl,block,lot,ownername,bldgclass,landuse,unitsres,unitstotal,yearbuilt,numfloors,zipcode",
+      $where: whereAnd([
+        `upper(address) like '${soqlLike(`${houseNumber} ${street}`.toUpperCase())}%'`,
+        eqText("borough", boro.short),
+      ]),
+      $order: "bbl",
+      $limit: 5,
+    });
+    return { matched: rows.length > 0, value: rows };
   });
+  const plutoRows = plutoResolved.value;
   const lots = plutoRows.map(normPlutoLot);
 
   if (lots.length === 0) {
@@ -2206,8 +2241,10 @@ async function trueOwner(args: Row): Promise<unknown> {
       found: false,
       note:
         "No PLUTO tax lot matched that address. PLUTO stores one combined address line per lot " +
-        '(e.g. "1520 SEDGWICK AVENUE"); try the exact street spelling, or a corner building\'s ' +
-        "other street. who_owns (HPD registration) may still answer." +
+        '(e.g. "1520 SEDGWICK AVENUE") and the house number must START it; ' +
+        (plutoResolved.tried.length > 1 ? `tried house-number spellings: ${plutoResolved.tried.join(", ")}. ` : "") +
+        "Try the exact street spelling, or a corner building's other street. " +
+        "who_owns (HPD registration) may still answer." +
         (boro.short === "SI"
           ? " Note: even with a PLUTO match, Staten Island deeds live with the Richmond County Clerk, not ACRIS."
           : ""),
@@ -2316,9 +2353,19 @@ async function trueOwner(args: Row): Promise<unknown> {
   }
 
   return {
-    query: { house_number: houseNumberInput, street, borough: boro.text },
+    query: {
+      house_number: houseNumberInput,
+      // Which spelling actually found the lot, when it was not the one given.
+      house_number_searched: plutoResolved.matchedVariant ? plutoResolved.houseNumber : undefined,
+      street,
+      borough: boro.text,
+    },
     found: true,
+    // assessor_owner, latest_deed and speculation_watch all come from lots[0].
+    // The lot it names is stated here rather than left to be read out of the
+    // lots array, because those three fields carry no address of their own.
     assessor_owner: first.owner_name ?? null,
+    assessor_owner_lot_address: first.address ?? null,
     lots,
     latest_deed: latestDeed,
     acris_documents: acrisDocs,
@@ -2329,7 +2376,13 @@ async function trueOwner(args: Row): Promise<unknown> {
       "assessment roll (can lag sales, and for co-ops/condos may name the building entity); ACRIS " +
       "documents are the recorded instruments themselves (for a deed, party_1 = seller, party_2 = " +
       "buyer; for a mortgage, party_1 = borrower, party_2 = lender); who_owns is HPD's " +
-      "self-reported registration. When they disagree, the recorded deed is the strongest evidence.",
+      "self-reported registration. When they disagree, the recorded deed is the strongest evidence. " +
+      "assessor_owner, latest_deed and speculation_watch are all read off the FIRST lot " +
+      `(${str(first.address) ?? "see lots[0]"}); a corner or multi-lot building returns more than one, ` +
+      "and the others are in `lots`." +
+      (plutoResolved.matchedVariant
+        ? ` No lot began with "${houseNumberInput}"; the address spelling "${plutoResolved.houseNumber}" is the one that matched.`
+        : ""),
   };
 }
 
