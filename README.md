@@ -268,16 +268,16 @@ npm run verify:mcpb
 Counts, measured 2026-09-15:
 
 ```
-find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2646 = 2654 app LOC (smoke.ts 139 is the live harness)
-find test -name '*.ts' | xargs wc -l                                                                           # 2171 test LOC
-npm test                                                                                                       # Tests 113 passed (113)
+find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2774 = 2782 app LOC (smoke.ts 139 is the live harness)
+find test -name '*.ts' | xargs wc -l                                                                           # 2306 test LOC
+npm test                                                                                                       # Tests 121 passed (121)
 ```
 
 What the tests cover, by layer: SoQL query construction (where clauses, LIKE escaping, borough aliases, Queens hyphenated house numbers, date validation) is asserted on the URL the mocked fetch receives. Tool responses (summaries, normalized rows, `found`/`note` fields, isError text) are asserted on the parsed payload. Transport behavior (app token and User-Agent headers, 5xx/429 retry counts, 4xx no-retry, non-JSON bodies, response cache hit/miss, IN() chunking at 100 ids) is asserted on call counts and request init.
 
-Mutation probe, re-run 2026-09-15: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. Three tests failed and 110 passed — `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3), and both `crossing the resolution ceiling on a chunk's short final page` cases, which report `buildings_found` 2000 instead of 2050 and print a ceiling note over a portfolio that was read in full, because one chunk of 200 ids reaches the ceiling on a full page rather than a short one. Source restored after the run.
+Mutation probe, re-run 2026-09-15: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. Three tests failed and 118 passed — `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3), and both `crossing the resolution ceiling on a chunk's short final page` cases, which report `buildings_found` 2000 instead of 2050 and print a ceiling note over a portfolio that was read in full, because one chunk of 200 ids reaches the ceiling on a full page rather than a short one. Source restored after the run.
 
-Wiring assertions, 2026-09-15: 31 `toHaveBeenCalled*` sites. Most sit beside a payload or URL assertion on the same response; the ones that assert a call count alone do so because the count is the whole contract there — the response cache (repeat query = one fetch, different params = two fetches), the retry cap, and the house-number variant probes (a second spelling is attempted only after the first returns zero). Policy: assert behavior and payloads, never that a function was merely called.
+Wiring assertions, 2026-09-15: 32 `toHaveBeenCalled*` sites. Most sit beside a payload or URL assertion on the same response; the ones that assert a call count alone do so because the count is the whole contract there — the response cache (repeat query = one fetch, different params = two fetches), the retry cap, and the house-number variant probes (a second spelling is attempted only after the first returns zero). Policy: assert behavior and payloads, never that a function was merely called.
 
 The fetch stub honours `$limit` and `$offset`. A stub that returns every fixture row regardless of the query cannot fail on a paging or cap bug, which is how a portfolio truncation — a chunk capped at its own registration-id count — passed a green suite.
 
