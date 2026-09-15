@@ -101,7 +101,7 @@ npm run build     # emits dist/; the published bin is dist/index.js
 
 ### Bundle (`.mcpb`)
 
-`manifest.json` describes the server as an [MCP Bundle](https://github.com/anthropics/mcpb), for hosts that install a local server from a single file. Build one:
+`manifest.json` describes the server as an [MCP Bundle](https://github.com/anthropics/mcpb), for hosts that install a local server from a single file. Verify that channel:
 
 ```bash
 npm run verify:mcpb
@@ -109,7 +109,9 @@ npm run verify:mcpb
 
 That stages `dist/` plus production dependencies, packs the bundle with the vendor CLI (which validates the manifest first), unpacks it, launches the server through the `mcp_config` in the packed manifest, and asserts the ten tools over stdio. It runs in the CI `package` job beside `verify:pack`, so the bundle channel is measured rather than assumed.
 
-The app token is declared as an optional `user_config` field (`required: false`, `sensitive: true`) injected as `NYC_APP_TOKEN`. The server treats a value still containing `${` as unset, so a host that passes an unsubstituted template for a field the user skipped does not produce a bad-credential header.
+It stages and packs into a throwaway directory and removes it afterwards, so it proves the bundle rather than producing one. To keep a bundle, stage `dist/` plus production dependencies and run `npx @anthropic-ai/mcpb pack <stage-dir> <out>.mcpb` yourself.
+
+The app token is declared as an optional `user_config` field (`required: false`, `sensitive: true`) injected as `NYC_APP_TOKEN`. The server treats a value still containing `${` as unset, so a host that passes an unsubstituted template for a field the user skipped does not produce a bad-credential header. The probe launches the bundle with exactly that unsubstituted template, since that is the case the guard exists for.
 
 A bundle carries its own `node_modules`, which means it ships the MCP SDK's `hono` / `express` subtree inside the artifact. The same reasoning as `test/no-http-stack.test.ts` applies to this channel: those packages are present in the dependency tree but unreachable, because nothing in this server imports an HTTP transport. That test reads the source and pins the property; a vulnerability scan of the bundle will still list them.
 
@@ -244,15 +246,16 @@ There is no geocoding here. Address matching is literal against how HPD stores a
 
 - Street names are stored uppercase. The server uppercases and trims your `street` input and matches it as a substring (`upper(streetname) like '%YOUR STREET%'`). So `Sedgwick`, `sedgwick avenue`, and `SEDGWICK AVE` all match `SEDGWICK AVENUE`, but a very short input can over-match (`5 St` would also hit `125 St`). Pass the fuller street name when you can.
 - House number is matched exactly (uppercased) first — and on a zero, the per-building tools retry spelling variants and the response's `note` names the ones tried. Separator variants are always tried (`120 15` and `120-15` each also try the other and `12015`). **Splitting a plain number into a hyphenated one (`12015` -> `120-15`) is generated for Queens addresses only**, since rewriting a plain number elsewhere would point at an unrelated building — so outside Queens, pass the hyphenated spelling yourself if the exact one reads zero. Multi-address buildings can still register under a range (`1516-1520`).
+- The retry stops at the first spelling that matches, so the rest are never sent — and DOB files one building under more than one spelling, each holding its own rows. On `3h2n-5cm9` with borough Queens and street `Queens Boulevard`, house number `9015` returns 12 violations and `90-15` returns 383. `dob_building` names the spellings it did not send, per section, so a small count does not read as the whole record. `building_profile` covers the other side of the same miss: when it finds nothing in any dataset, its `note` names the spellings tried and repeats that the street is substring-matched, instead of returning an all-zero profile that reads as a clean building.
 - Borough disambiguates same-numbered streets across boroughs, so it is required for the building tools. Litigations store a numeric borough code; evictions mix borough and county spellings (Brooklyn and Kings, Manhattan and New York, Staten Island and Richmond), and the borough filter expands to all of them.
-- Evictions store one free-text address line, often a house-number range with an abbreviated or mangled street (`2763-69 SEDGWICK AVE`, `3605 SEDGWICK    AVE NUE`). `building_profile` anchors both halves on a token boundary: the house number cannot match inside a longer number, and the street's distinctive word cannot match inside a longer word, with a stem of the street type (`AV` for Avenue, `RD` or `RO` for Road) required somewhere in the line — without that, a search for 1650 Ocean Avenue in Brooklyn counts 1650 Ocean Parkway's evictions. It returns `evictions_matched_addresses`, the stored spellings behind the count with a per-spelling count, so a match you did not intend is visible rather than hidden inside the integer. `evictions_executed` is its own aggregate over the same filter, so the address list's cap does not cap it. One stored line can still name two addresses (`155B KINGSBRIDGE RD A/K/A 2707 SEDGWICK AVENUE`) and is counted for either.
+- Evictions store one free-text address line, often a house-number range with an abbreviated or mangled street (`2763-69 SEDGWICK AVE`, `3605 SEDGWICK    AVE NUE`). `building_profile` anchors both halves on a token boundary: the house number cannot match inside a longer number, and the street's distinctive word cannot match inside a longer word, with a stem of the street type (`AV` for Avenue, `RD` or `RO` for Road) required to be the next token after it. Both halves of the street anchor earn their place: without the word boundary, a search for 1650 Ocean Avenue in Brooklyn counts 1650 Ocean Parkway's evictions; with the boundary but the stem free to appear anywhere in the line, a search for 590 Morris Avenue in the Bronx counts `590 MORRIS PARK AVE`, a different street that carries `AV` anyway. Because the column stores runs of spaces between tokens, runs up to eight are matched. It returns `evictions_matched_addresses`, the stored spellings behind the count with a per-spelling count, so a match you did not intend is visible rather than hidden inside the integer. `evictions_executed` is its own aggregate over the same filter, so the address list's cap does not cap it. One stored line can still name two addresses (`155B KINGSBRIDGE RD A/K/A 2707 SEDGWICK AVENUE`) and is counted for either.
 - `landlord_portfolio` matches names the same way: uppercase substring against `corporationname`, `firstname`, `lastname`, and the `firstname || ' ' || lastname` concatenation (so a pasted `person_name` from `who_owns` works). LIKE wildcards (`%`, `_`) in your input are escaped. Pass the fullest name you have; a short fragment like `SMITH` or `LLC` over-matches, and the response says how many contact records matched before any cap.
 - `who_owns`, `landlord_portfolio`, `landlord_litigation`, and the datasets themselves reflect HPD filings, which can lag reality. Confirm anything you intend to act on (for example a name to serve) before relying on it.
 
 ## Testing
 
 ```
-npm test         # vitest, fetch mocked (no network); 104 tests in 2 files
+npm test         # vitest, fetch mocked (no network); 113 tests in 2 files
 npm run smoke    # one live call per tool against SODA (keyless, no setup)
 npm run typecheck
 npm run verify:pack
@@ -261,19 +264,19 @@ npm run verify:mcpb
 
 `npm test` is the offline tier: `test/server.test.ts` stubs `globalThis.fetch` and drives every tool through an in-memory MCP client; `test/no-http-stack.test.ts` reads the source and pins that only the stdio transport is imported. `npm run smoke` is the live tier (real SODA calls, not run in CI). There are no test markers; the split is the two scripts.
 
-Counts, measured 2026-09-14:
+Counts, measured 2026-09-15:
 
 ```
-find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2561 = 2569 app LOC (smoke.ts 139 is the live harness)
-find test -name '*.ts' | xargs wc -l                                                                           # 2040 test LOC
-npm test                                                                                                       # Tests 104 passed (104)
+find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2646 = 2654 app LOC (smoke.ts 139 is the live harness)
+find test -name '*.ts' | xargs wc -l                                                                           # 2171 test LOC
+npm test                                                                                                       # Tests 113 passed (113)
 ```
 
 What the tests cover, by layer: SoQL query construction (where clauses, LIKE escaping, borough aliases, Queens hyphenated house numbers, date validation) is asserted on the URL the mocked fetch receives. Tool responses (summaries, normalized rows, `found`/`note` fields, isError text) are asserted on the parsed payload. Transport behavior (app token and User-Agent headers, 5xx/429 retry counts, 4xx no-retry, non-JSON bodies, response cache hit/miss, IN() chunking at 100 ids) is asserted on call counts and request init.
 
-Mutation probe, re-run 2026-09-14: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. One test failed, `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3); the other 96 passed. Source restored after the run.
+Mutation probe, re-run 2026-09-15: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. Three tests failed and 110 passed — `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3), and both `crossing the resolution ceiling on a chunk's short final page` cases, which report `buildings_found` 2000 instead of 2050 and print a ceiling note over a portfolio that was read in full, because one chunk of 200 ids reaches the ceiling on a full page rather than a short one. Source restored after the run.
 
-Wiring assertions, 2026-09-14: 27 `toHaveBeenCalled*` sites. Most sit beside a payload or URL assertion on the same response; the ones that assert a call count alone do so because the count is the whole contract there — the response cache (repeat query = one fetch, different params = two fetches), the retry cap, and the house-number variant probes (a second spelling is attempted only after the first returns zero). Policy: assert behavior and payloads, never that a function was merely called.
+Wiring assertions, 2026-09-15: 31 `toHaveBeenCalled*` sites. Most sit beside a payload or URL assertion on the same response; the ones that assert a call count alone do so because the count is the whole contract there — the response cache (repeat query = one fetch, different params = two fetches), the retry cap, and the house-number variant probes (a second spelling is attempted only after the first returns zero). Policy: assert behavior and payloads, never that a function was merely called.
 
 The fetch stub honours `$limit` and `$offset`. A stub that returns every fixture row regardless of the query cannot fail on a paging or cap bug, which is how a portfolio truncation — a chunk capped at its own registration-id count — passed a green suite.
 
