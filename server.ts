@@ -494,10 +494,12 @@ function streetTypeWord(street: string): string | null {
 
 /**
  * The street, anchored the way houseNumberAnchored anchors the number: the
- * distinctive token sits on a word boundary, and when the caller's street
- * carried a generic type word, a stem of that word FOLLOWS the distinctive
- * token with nothing but spaces between (or the line ends on the distinctive
- * token, i.e. stores no type word).
+ * distinctive token sits on a word boundary; when the caller's street carried a
+ * generic type word, a stem of that word FOLLOWS the distinctive token with
+ * nothing but spaces between (or the line ends on the distinctive token, i.e.
+ * stores no type word); and no directional PRECEDES it (see STREET_DIRECTIONALS
+ * below -- that arm is the only one a street carrying no type word gets, and
+ * "475 WEST BROADWAY" was 475 Broadway's only reported eviction without it).
  *
  * A bare '%<distinctive>%' reads another street's evictions onto this building.
  * Measured live 2026-09-14 against 6z8x-wfk4: house 1650 on OCEAN AVENUE in
@@ -530,24 +532,63 @@ function streetTypeWord(street: string): string | null {
  *
  * Residual: house number and street are independent conditions on one free-text
  * line, so a row naming two addresses (A/K/A) can still be attributed to either.
+ * And a street name that is a SUFFIX of a longer one with no directional and no
+ * type word between them is still unguarded.
  */
 const STREET_TYPE_GAPS = [" ", "  ", "   ", "    ", "     ", "      ", "       ", "        "];
+
+/**
+ * Directionals that name a DIFFERENT street when they sit in front of the
+ * distinctive token. They are deliberately absent from STREET_TYPE_STEMS (a
+ * directional is not a type word), which is why neither the boundary arm nor
+ * the stem arm can see one.
+ */
+const STREET_DIRECTIONALS = ["NORTH", "SOUTH", "EAST", "WEST", "N", "S", "E", "W"];
 
 function streetAnchored(col: string, street: string): string {
   const dist = soqlLike(streetDistinctive(street));
   const boundary = [`'${dist} %'`, `'% ${dist} %'`, `'% ${dist}'`, `'${dist}'`]
     .map((p) => `upper(${col}) like ${p}`)
     .join(" OR ");
+  const conds = [`(${boundary})`];
   const type = streetTypeWord(street);
-  if (!type) return `(${boundary})`;
-  const arms: string[] = [];
-  for (const stem of STREET_TYPE_STEMS.get(type) ?? []) {
-    for (const gap of STREET_TYPE_GAPS) arms.push(`upper(${col}) like '%${dist}${gap}${soqlLike(stem)}%'`);
+  if (type) {
+    const arms: string[] = [];
+    for (const stem of STREET_TYPE_STEMS.get(type) ?? []) {
+      for (const gap of STREET_TYPE_GAPS) arms.push(`upper(${col}) like '%${dist}${gap}${soqlLike(stem)}%'`);
+    }
+    // No type word stored at all ("68 WEST 238TH STRE ET AKA 3605 SEDGWICK"):
+    // the line ending on the distinctive token is not some other street.
+    arms.push(`upper(${col}) like '% ${dist}'`, `upper(${col}) like '${dist}'`);
+    conds.push(`(${arms.join(" OR ")})`);
   }
-  // No type word stored at all ("68 WEST 238TH STRE ET AKA 3605 SEDGWICK"):
-  // the line ending on the distinctive token is not some other street.
-  arms.push(`upper(${col}) like '% ${dist}'`, `upper(${col}) like '${dist}'`);
-  return `((${boundary}) AND (${arms.join(" OR ")}))`;
+  // A DIRECTIONAL in front of the distinctive token names a DIFFERENT street,
+  // and neither guard above can see it -- least of all on a street carrying no
+  // type word, which gets the boundary arm ALONE. Live 2026-09-15 against
+  // 6z8x-wfk4: "475 WEST BROADWAY" was the only executed eviction the profile
+  // reported for 475 Broadway, Manhattan (both buildings HPD-registered in
+  // tesw-yqqr, buildingid 8330 and 43923); 88 Broadway read 3, all of them West
+  // or East Broadway's; 341 and 482 Broadway read 1 each, both West Broadway's.
+  //
+  // Skipped when the caller's OWN street starts with a directional, since it is
+  // then part of `dist` and excluding it would exclude the building itself
+  // (475 West Broadway still returns its own 1).
+  //
+  // Re-measured with this clause, live 2026-09-15: 475 / 341 / 482 / 88
+  // Broadway -> 0, 424 Broadway -> 1 (its own "424-426 BROADWAY COMMERICAL UNIT
+  // NO. 1" row, down from 2), 475 West Broadway -> 1, and every regression case
+  // holds -- 1520 / 2763 / 2707 / 3605 SEDGWICK at 13 / 8 / 7 / 17, 4064 BRONX
+  // BLVD 13, 3704 WHITE PLAINS RD 1, 1170 OCEAN AVENUE 4, 562 MORRIS AVENUE 6,
+  // and 1650 OCEAN / 100 PARK PLACE / 1500 GRAND AVENUE at 0.
+  if (!STREET_DIRECTIONALS.includes(dist.split(" ")[0])) {
+    const excl: string[] = [];
+    for (const d of STREET_DIRECTIONALS) {
+      for (const gap of STREET_TYPE_GAPS) excl.push(`upper(${col}) like '% ${d}${gap}${dist}%'`);
+      excl.push(`upper(${col}) like '${d} ${dist}%'`);
+    }
+    conds.push(`NOT (${excl.join(" OR ")})`);
+  }
+  return `(${conds.join(" AND ")})`;
 }
 
 /** `col >= 'isoDate'` for a floating-timestamp column. isoDate must be trusted. */

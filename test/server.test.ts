@@ -1601,17 +1601,56 @@ describe("building_profile", () => {
       expect(w).toContain("upper(eviction_address) like '% OCEAN %'");
       expect(w).not.toContain("like '%OCEAN%'");
       expect(w).toContain("upper(eviction_address) like '%OCEAN AV%'");
-      // A street with no type word carries no stem condition at all.
-      expect(__test.streetAnchored("eviction_address", "Grand Concourse")).toBe(
+      // A street with no type word carries no stem condition at all -- but it
+      // still carries the directional exclusion, which is the only guard it has.
+      const gc = __test.streetAnchored("eviction_address", "Grand Concourse");
+      expect(gc).toContain(
         "(upper(eviction_address) like 'GRAND CONCOURSE %'" +
           " OR upper(eviction_address) like '% GRAND CONCOURSE %'" +
           " OR upper(eviction_address) like '% GRAND CONCOURSE'" +
           " OR upper(eviction_address) like 'GRAND CONCOURSE')",
       );
+      expect(gc).not.toContain("GRAND CONCOURSE CO"); // no type stem arm
+      expect(gc).toContain("NOT (");
       // A wildcard in the caller's input stays literal, on both arms.
       const esc = __test.streetAnchored("eviction_address", "A%B Street");
       expect(esc).toContain("'A\\%B %'");
       expect(esc).toContain("'%A\\%B ST%'");
+    });
+
+    // A DIRECTIONAL in front of the distinctive token names a different street,
+    // and it is invisible to both arms above -- a street carrying no type word
+    // (Broadway, Grand Concourse, Avenue X) gets the boundary arm alone. Live
+    // 2026-09-15 against 6z8x-wfk4, without this clause building_profile for
+    // 475 Broadway, Manhattan reported one executed eviction and it belonged to
+    // 475 WEST BROADWAY; 88 Broadway reported 3, all West or East Broadway's.
+    // With it: 475 / 341 / 482 / 88 Broadway -> 0, 424 Broadway -> its own 1,
+    // 475 West Broadway -> its own 1.
+    it("rejects a directional in front of the distinctive token (unit)", () => {
+      const w = __test.streetAnchored("eviction_address", "Broadway");
+      expect(w).toContain("NOT (");
+      expect(w).toContain("upper(eviction_address) like '% WEST BROADWAY%'");
+      expect(w).toContain("upper(eviction_address) like '% EAST BROADWAY%'");
+      expect(w).toContain("upper(eviction_address) like '% W BROADWAY%'");
+      expect(w).toContain("upper(eviction_address) like 'WEST BROADWAY%'");
+      // The column mangles the gap between tokens, so the runs are enumerated
+      // on this arm too.
+      expect(w).toContain("upper(eviction_address) like '% WEST  BROADWAY%'");
+      // A street with a type word gets it as well -- Morris Avenue must not
+      // collect East Morris Avenue's rows either.
+      expect(__test.streetAnchored("eviction_address", "Morris Avenue")).toContain(
+        "upper(eviction_address) like '% EAST MORRIS%'",
+      );
+    });
+
+    // Skipped when the caller's own street STARTS with a directional: it is
+    // part of the distinctive token then, and excluding it would exclude the
+    // building itself.
+    it("does not exclude the caller's own directional street (unit)", () => {
+      const w = __test.streetAnchored("eviction_address", "West Broadway");
+      expect(w).not.toContain("NOT (");
+      expect(w).toContain("upper(eviction_address) like '% WEST BROADWAY %'");
+      expect(__test.streetAnchored("eviction_address", "E 138 Street")).not.toContain("NOT (");
     });
 
     // The stem must be the NEXT token, not merely present. A street whose name
