@@ -990,11 +990,19 @@ function normAep(r: Row): Record<string, unknown> {
   };
 }
 
-/** One PLUTO tax lot (64uk-42ks). ownername is DOF's assessment-roll owner. */
+/**
+ * One PLUTO tax lot (64uk-42ks). ownername is DOF's assessment-roll owner.
+ *
+ * bbl arrives float-formatted: live 2026-09-14, 1520 SEDGWICK AVENUE (borough
+ * BX) serves "2028800017.00000000". A BBL is the identifier a caseworker copies
+ * into ACRIS or DOF, and the decimal tail makes it unusable there, so the
+ * all-zero fraction is trimmed. A non-zero fraction would be a real anomaly and
+ * is left visible rather than rounded away.
+ */
 function normPlutoLot(r: Row): Record<string, unknown> {
   return {
     address: str(r.address),
-    bbl: str(r.bbl),
+    bbl: str(r.bbl)?.replace(/\.0+$/, "") ?? null,
     block: num(r.block),
     lot: num(r.lot),
     owner_name: str(r.ownername),

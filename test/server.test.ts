@@ -1432,6 +1432,10 @@ describe("true_owner", () => {
 
     expect(body.found).toBe(true);
     expect(body.assessor_owner).toBe("WFHA 1520 SEDGWICK LP");
+    // PLUTO serves bbl float-formatted (live 2026-09-14, 1520 SEDGWICK AVENUE
+    // in BX comes back "2028800017.00000000"). A BBL with a decimal tail is
+    // not the identifier a caseworker can paste into ACRIS or DOF.
+    expect(body.lots[0].bbl).toBe("2032870050");
     // PLUTO is queried with the 2-letter borough code and a combined-address LIKE.
     expect(urlOf(0).pathname).toContain("64uk-42ks.json");
     expect(whereOf(0)).toContain("borough='BX'");
