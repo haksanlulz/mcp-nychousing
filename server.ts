@@ -799,14 +799,57 @@ async function tryHouseNumberVariants<T>(
  * zero; (2) the street field is substring-matched, so the shortest
  * distinctive fragment ("Sedgwick", not "Sedgwich Av") is the reliable form.
  */
-function emptyBuildingNote(triedVariants: string[], street: string): string {
+function emptyBuildingNote(triedVariants: string[], street: string, elsewhere?: OtherBoroughs): string {
   const tried = triedVariants.length > 1 ? `Tried house-number spellings: ${triedVariants.join(", ")}. ` : "";
+  const borough =
+    elsewhere === undefined
+      ? "Check the borough. "
+      : elsewhere.found.length
+        ? `This house number and street ARE registered with HPD in ${elsewhere.found.join(" and ")}, ` +
+          `not ${elsewhere.searched} — the borough is almost certainly wrong; re-run with ` +
+          `${elsewhere.found.length === 1 ? `borough "${elsewhere.found[0]}"` : "one of those boroughs"}. `
+        : "This house number and street are not registered with HPD in any borough, so the address " +
+          "itself is the likelier problem. ";
   return (
-    `No rows matched. ${tried}` +
+    `No rows matched. ${tried}${borough}` +
     `Street is matched as a substring — a misspelling returns zero, so try the shortest distinctive ` +
-    `fragment of the street name (e.g. "Sedgwick" rather than ${JSON.stringify(street)}), and check ` +
-    "the borough. A true zero and a wrong-spelling zero look identical without this."
+    `fragment of the street name (e.g. "Sedgwick" rather than ${JSON.stringify(street)}). ` +
+    "A true zero and a wrong-spelling zero look identical without this."
   );
+}
+
+type OtherBoroughs = { searched: string; found: string[] };
+
+/**
+ * The commonest wrong-input zero is the wrong borough, and it is the one zero
+ * the server can rescue by itself: HPD registrations list every registered
+ * building with its borough, so one grouped query over the other four says
+ * where the address actually is. Found live 2026-09-20 through a chat client:
+ * a local model asked about "1520 Sedgwick" with no borough guessed BROOKLYN,
+ * got a correct zero, and reported "no match" — the building is in the BRONX
+ * and nothing in the response could have said so. Every house-number spelling
+ * the caller already tried is probed; the street is the same substring match.
+ * A probe failure is swallowed into "unknown" (undefined) rather than turning
+ * an honest zero into an error.
+ */
+async function otherBoroughsWithAddress(
+  houseNumberVariants: string[],
+  street: string,
+  boro: Borough,
+): Promise<OtherBoroughs | undefined> {
+  try {
+    const hn = houseNumberVariants.map((v) => eqTextCI("housenumber", v));
+    const rows = await sodaGet(DATASET.registrations, {
+      $select: "boro,count(1) as n",
+      $where: whereAnd([`(${hn.join(" OR ")})`, `boro != '${soql(boro.text)}'`, likeCI("streetname", street)]),
+      $group: "boro",
+      $order: "boro",
+    });
+    const found = rows.map((r) => str(r.boro)).filter((b): b is string => !!b && (num(rows.find((x) => str(x.boro) === b)?.n) ?? 0) > 0);
+    return { searched: boro.text, found: [...new Set(found)] };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Turn an aggregate `[{key, n}]` result into a { key: count } object + total. */
@@ -1461,6 +1504,7 @@ async function buildingViolations(args: Row): Promise<unknown> {
       ? await sodaGet(DATASET.violations, { $where: where, $order: "inspectiondate DESC", $limit: limit })
       : [];
   const results = rows.map(normViolation);
+  const elsewhere = total === 0 ? await otherBoroughsWithAddress(variants, street, boro) : undefined;
 
   return {
     query: {
@@ -1473,10 +1517,11 @@ async function buildingViolations(args: Row): Promise<unknown> {
       since: str(args.since) ?? null,
     },
     summary: { total_matching: total, by_class: by },
+    found_in_other_boroughs: elsewhere?.found,
     note: resolved.matchedVariant
       ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
       : total === 0
-        ? emptyBuildingNote(variants, street)
+        ? emptyBuildingNote(variants, street, elsewhere)
         : undefined,
     returned: results.length,
     results,
@@ -1523,6 +1568,7 @@ async function buildingComplaints(args: Row): Promise<unknown> {
       ? await sodaGet(DATASET.complaints, { $where: where, $order: "received_date DESC", $limit: limit })
       : [];
   const results = rows.map(normComplaint);
+  const elsewhere = total === 0 ? await otherBoroughsWithAddress(variants, street, boro) : undefined;
 
   return {
     query: {
@@ -1534,10 +1580,11 @@ async function buildingComplaints(args: Row): Promise<unknown> {
       since: str(args.since) ?? null,
     },
     summary: { total_matching: total, by_status: by },
+    found_in_other_boroughs: elsewhere?.found,
     note: resolved.matchedVariant
       ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
       : total === 0
-        ? emptyBuildingNote(variants, street)
+        ? emptyBuildingNote(variants, street, elsewhere)
         : undefined,
     returned: results.length,
     results,
@@ -2197,6 +2244,8 @@ async function buildingProfile(args: Row): Promise<unknown> {
     vacateRows.length === 0 &&
     bedbugRows.length === 0 &&
     emergencyRepairCharges === 0;
+  const profileVariants = houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" });
+  const elsewhere = foundNothing ? await otherBoroughsWithAddress(profileVariants, street, boro) : undefined;
 
   return {
     query: {
@@ -2228,13 +2277,11 @@ async function buildingProfile(args: Row): Promise<unknown> {
     vacate_orders: vacateRows.map(normVacate),
     bedbug_filings: bedbugRows.map(normBedbug),
     emergency_repair_charges: emergencyRepairCharges,
+    found_in_other_boroughs: elsewhere?.found,
     note: resolved.matchedVariant
       ? `No exact match for "${houseNumberInput}"; the profile uses HPD's stored house number "${hn}" (NYC outer-borough addresses are stored hyphenated, e.g. 120-15).`
       : foundNothing
-        ? emptyBuildingNote(
-            houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" }),
-            street,
-          )
+        ? emptyBuildingNote(profileVariants, street, elsewhere)
         : undefined,
     next_steps:
       "Detail tools: building_violations / building_complaints (rows), landlord_litigation (cases), " +

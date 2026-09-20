@@ -702,14 +702,49 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
     expect(String(body.note)).toMatch(/Queens addresses only/);
   });
 
+  // A zero in the wrong borough is the commonest wrong-input zero and the
+  // easiest to rescue: HPD registrations carry every registered building with
+  // its borough, so one grouped query over the OTHER four boroughs says where
+  // the address actually is. Found live 2026-09-20 through mcp-chat: a local
+  // model asked about "1520 Sedgwick" with no borough, guessed BROOKLYN, got a
+  // correct zero, and reported "no match" — the building is in the BRONX and
+  // nothing in the answer could have said so.
+  it("RED LEG: a zero in the wrong borough names the borough(s) where the address IS registered", async () => {
+    fetchMock.mockImplementation(async (url: URL) => {
+      const where = url.searchParams.get("$where") ?? "";
+      // the cross-borough probe: registrations, boro != BROOKLYN, grouped
+      if (url.pathname.includes("tesw-yqqr") && /boro\s*!=/.test(where)) {
+        return jsonResponse([{ boro: "BRONX", n: "1" }]);
+      }
+      return jsonResponse([]);
+    });
+    const body = payload(await call("building_violations", { house_number: "1520", street: "Sedgwick", borough: "Brooklyn" }));
+    expect(body.summary.total_matching).toBe(0);
+    expect(body.query.borough).toBe("BROOKLYN");
+    expect(String(body.note)).toMatch(/registered with HPD in BRONX, not BROOKLYN/);
+    expect(String(body.note)).toMatch(/re-run with borough "BRONX"/);
+    expect(body.found_in_other_boroughs).toEqual(["BRONX"]);
+  });
+
+  it("a zero that is nowhere in the city says so, and the probe ran", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const body = payload(await call("building_violations", { house_number: "99999", street: "Nowhere Street", borough: "Queens" }));
+    expect(body.found_in_other_boroughs).toEqual([]);
+    expect(String(body.note)).toMatch(/not registered with HPD in any borough/);
+    const probes = fetchMock.mock.calls.map((c) => c[0] as URL).filter((u) => u.pathname.includes("tesw-yqqr"));
+    expect(probes.length).toBe(1);
+    expect(probes[0].searchParams.get("$where")).toMatch(/boro\s*!=\s*'QUEENS'/);
+  });
+
   it("building_violations reports zero when no variant matches", async () => {
     // Both the literal and the hyphenated variant return empty.
     fetchMock.mockResolvedValue(jsonResponse([]));
     const body = payload(await call("building_violations", { house_number: "99999", street: "Nowhere Street", borough: "Queens" }));
     expect(body.summary.total_matching).toBe(0);
     expect(body.returned).toBe(0);
-    // Two summary probes ("99999" then "999-99"); no detail call on a true zero.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Two summary probes ("99999" then "999-99"), then ONE cross-borough
+    // registrations probe; no detail call on a true zero.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     // Echoes what the user searched (no phantom correction).
     expect(body.query.house_number).toBe("99999");
     expect(body.query.house_number_searched).toBeUndefined();
@@ -2254,13 +2289,18 @@ describe("environment knob validation", () => {
     const c = await connect(mod);
     fetchMock.mockResolvedValue(jsonResponse([]));
 
-    for (const hn of ["1", "2", "3"]) await c.callTool({ name: "building_violations", arguments: violArgs(hn) });
+    // who_owns with a Bronx address is exactly ONE fetch per zero result (one
+    // house-number spelling, and no cross-borough probe — that rescue belongs
+    // to building_violations / building_complaints / building_profile, whose
+    // zero path is now two fetches and would double every count below).
+    const ownArgs = (hn: string) => ({ house_number: hn, street: "Anystreet", borough: "Bronx" });
+    for (const hn of ["1", "2", "3"]) await c.callTool({ name: "who_owns", arguments: ownArgs(hn) });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     // Inserting "3" evicted "1" (oldest), so asking for it again refetches...
-    await c.callTool({ name: "building_violations", arguments: violArgs("1") });
+    await c.callTool({ name: "who_owns", arguments: ownArgs("1") });
     expect(fetchMock).toHaveBeenCalledTimes(4);
     // ... while "3" is still resident.
-    await c.callTool({ name: "building_violations", arguments: violArgs("3") });
+    await c.callTool({ name: "who_owns", arguments: ownArgs("3") });
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
