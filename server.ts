@@ -807,7 +807,8 @@ function emptyBuildingNote(triedVariants: string[], street: string, elsewhere?: 
       : elsewhere.found.length
         ? `This house number and street ARE registered with HPD in ${elsewhere.found.join(" and ")}, ` +
           `not ${elsewhere.searched} — the borough is almost certainly wrong; re-run with ` +
-          `${elsewhere.found.length === 1 ? `borough "${elsewhere.found[0]}"` : "one of those boroughs"}. `
+          `${elsewhere.found.length === 1 ? `borough "${elsewhere.found[0]}"` : "one of those boroughs"}. ` +
+          (elsewhere.inline ? `${elsewhere.inline} ` : "")
         : "This house number and street are not registered with HPD in any borough, so the address " +
           "itself is the likelier problem. ";
   return (
@@ -818,7 +819,14 @@ function emptyBuildingNote(triedVariants: string[], street: string, elsewhere?: 
   );
 }
 
-type OtherBoroughs = { searched: string; found: string[] };
+type OtherBoroughs = {
+  searched: string;
+  found: string[];
+  /** One sentence of the other borough's own numbers, when exactly one other borough holds the address. */
+  inline?: string;
+  /** The redirected result itself, for the response body. */
+  redirected?: { borough: string; summary: Record<string, unknown> };
+};
 
 /**
  * The commonest wrong-input zero is the wrong borough, and it is the one zero
@@ -836,6 +844,12 @@ async function otherBoroughsWithAddress(
   houseNumberVariants: string[],
   street: string,
   boro: Borough,
+  // When exactly one other borough holds the address, the tool can supply its
+  // own summary there under the caller's filters. Measured 2026-09-20: a
+  // redirect sentence alone was not enough for a small local model, which
+  // narrated the wrong-borough zero as the right borough's answer under two
+  // prompt wordings. A number is an answer; an instruction is not.
+  redirect?: (other: Borough) => Promise<{ summary: Record<string, unknown>; sentence: string }>,
 ): Promise<OtherBoroughs | undefined> {
   try {
     const hn = houseNumberVariants.map((v) => eqTextCI("housenumber", v));
@@ -846,7 +860,18 @@ async function otherBoroughsWithAddress(
       $order: "boro",
     });
     const found = rows.map((r) => str(r.boro)).filter((b): b is string => !!b && (num(rows.find((x) => str(x.boro) === b)?.n) ?? 0) > 0);
-    return { searched: boro.text, found: [...new Set(found)] };
+    const out: OtherBoroughs = { searched: boro.text, found: [...new Set(found)] };
+    if (redirect && out.found.length === 1 && BOROUGHS[out.found[0]!]) {
+      try {
+        const other = BOROUGHS[out.found[0]!]!;
+        const r = await redirect(other);
+        out.inline = r.sentence;
+        out.redirected = { borough: other.text, summary: r.summary };
+      } catch {
+        // the redirect is a courtesy; its failure leaves the note's instruction standing
+      }
+    }
+    return out;
   } catch {
     return undefined;
   }
@@ -1470,10 +1495,10 @@ async function buildingViolations(args: Row): Promise<unknown> {
   const violationClass = str(args.violation_class);
   const limit = clampLimit(args.limit, 100);
 
-  const buildWhere = (houseNumber: string): string | undefined => {
+  const buildWhere = (houseNumber: string, inBoro: Borough = boro): string | undefined => {
     const conditions = [
       eqTextCI("housenumber", houseNumber),
-      eqText("boro", boro.text),
+      eqText("boro", inBoro.text),
       likeCI("streetname", street),
     ];
     if (openOnly) conditions.push(eqTextCI("violationstatus", "OPEN"));
@@ -1504,7 +1529,27 @@ async function buildingViolations(args: Row): Promise<unknown> {
       ? await sodaGet(DATASET.violations, { $where: where, $order: "inspectiondate DESC", $limit: limit })
       : [];
   const results = rows.map(normViolation);
-  const elsewhere = total === 0 ? await otherBoroughsWithAddress(variants, street, boro) : undefined;
+  const elsewhere =
+    total === 0
+      ? await otherBoroughsWithAddress(variants, street, boro, async (other) => {
+          const there = await tryHouseNumberVariants(variants, async (houseNumber) => {
+            const summaryRows = await sodaGet(DATASET.violations, {
+              $select: "class,count(1) as n",
+              $where: buildWhere(houseNumber, other),
+              $group: "class",
+              $order: "class",
+            });
+            const t = tally(summaryRows, "class");
+            return { matched: t.total > 0, value: t };
+          });
+          const { total: n, by } = there.value;
+          const byClass = Object.entries(by).map(([k, v]) => `${v} ${k}`).join(" / ");
+          return {
+            summary: { total_matching: n, by_class: by },
+            sentence: `${other.text} has ${n} matching violation${n === 1 ? "" : "s"}${byClass ? ` (${byClass})` : ""} under these same filters.`,
+          };
+        })
+      : undefined;
 
   return {
     query: {
@@ -1518,6 +1563,7 @@ async function buildingViolations(args: Row): Promise<unknown> {
     },
     summary: { total_matching: total, by_class: by },
     found_in_other_boroughs: elsewhere?.found,
+    elsewhere: elsewhere?.redirected,
     note: resolved.matchedVariant
       ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
       : total === 0
@@ -1536,10 +1582,10 @@ async function buildingComplaints(args: Row): Promise<unknown> {
   const since = normSince(args.since, "since");
   const limit = clampLimit(args.limit, 100);
 
-  const buildWhere = (houseNumber: string): string | undefined => {
+  const buildWhere = (houseNumber: string, inBoro: Borough = boro): string | undefined => {
     const conditions = [
       eqTextCI("house_number", houseNumber),
-      eqText("borough", boro.text),
+      eqText("borough", inBoro.text),
       likeCI("street_name", street),
     ];
     if (openOnly) conditions.push(eqTextCI("complaint_status", "OPEN"));
@@ -1568,7 +1614,27 @@ async function buildingComplaints(args: Row): Promise<unknown> {
       ? await sodaGet(DATASET.complaints, { $where: where, $order: "received_date DESC", $limit: limit })
       : [];
   const results = rows.map(normComplaint);
-  const elsewhere = total === 0 ? await otherBoroughsWithAddress(variants, street, boro) : undefined;
+  const elsewhere =
+    total === 0
+      ? await otherBoroughsWithAddress(variants, street, boro, async (other) => {
+          const there = await tryHouseNumberVariants(variants, async (houseNumber) => {
+            const summaryRows = await sodaGet(DATASET.complaints, {
+              $select: "complaint_status,count(1) as n",
+              $where: buildWhere(houseNumber, other),
+              $group: "complaint_status",
+              $order: "complaint_status",
+            });
+            const t = tally(summaryRows, "complaint_status");
+            return { matched: t.total > 0, value: t };
+          });
+          const { total: n, by } = there.value;
+          const byStatus = Object.entries(by).map(([k, v]) => `${v} ${k}`).join(" / ");
+          return {
+            summary: { total_matching: n, by_status: by },
+            sentence: `${other.text} has ${n} matching complaint${n === 1 ? "" : "s"}${byStatus ? ` (${byStatus})` : ""} under these same filters.`,
+          };
+        })
+      : undefined;
 
   return {
     query: {
@@ -1581,6 +1647,7 @@ async function buildingComplaints(args: Row): Promise<unknown> {
     },
     summary: { total_matching: total, by_status: by },
     found_in_other_boroughs: elsewhere?.found,
+    elsewhere: elsewhere?.redirected,
     note: resolved.matchedVariant
       ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
       : total === 0

@@ -726,6 +726,42 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
     expect(body.found_in_other_boroughs).toEqual(["BRONX"]);
   });
 
+  // The note alone was measured NOT to be enough for a small local model: told
+  // "registered in BRONX, not BROOKLYN", it narrated the Brooklyn zero as the
+  // Bronx answer, twice, under two prompt wordings (2026-09-20). A redirect is
+  // an instruction; a number is an answer. So when exactly ONE other borough
+  // holds the address, the tool also runs its own summary there — same filters
+  // the caller gave — and returns it inline as `elsewhere`.
+  it("RED LEG: with one other borough, the response carries that borough's summary under the caller's own filters", async () => {
+    fetchMock.mockImplementation(async (url: URL) => {
+      const where = url.searchParams.get("$where") ?? "";
+      if (url.pathname.includes("tesw-yqqr") && /boro\s*!=/.test(where)) return jsonResponse([{ boro: "BRONX", n: "1" }]);
+      if (url.pathname.includes("wvxf-dwi5") && /boro='BRONX'/.test(where)) {
+        // the redirected summary must carry the caller's open_only filter
+        expect(where).toMatch(/violationstatus/);
+        return jsonResponse([{ class: "A", n: "16" }, { class: "B", n: "35" }, { class: "C", n: "72" }]);
+      }
+      return jsonResponse([]);
+    });
+    const body = payload(await call("building_violations", { house_number: "1520", street: "Sedgwick", borough: "Brooklyn", open_only: true }));
+    expect(body.summary.total_matching).toBe(0);
+    expect(body.elsewhere).toEqual({ borough: "BRONX", summary: { total_matching: 123, by_class: { A: 16, B: 35, C: 72 } } });
+    expect(String(body.note)).toMatch(/BRONX has 123 matching violations? \(16 A \/ 35 B \/ 72 C\)/);
+  });
+
+  it("with two other boroughs, no summary is fetched inline — the caller must choose", async () => {
+    fetchMock.mockImplementation(async (url: URL) => {
+      const where = url.searchParams.get("$where") ?? "";
+      if (url.pathname.includes("tesw-yqqr") && /boro\s*!=/.test(where)) return jsonResponse([{ boro: "BRONX", n: "1" }, { boro: "QUEENS", n: "2" }]);
+      return jsonResponse([]);
+    });
+    const body = payload(await call("building_violations", { house_number: "1", street: "Main", borough: "Brooklyn" }));
+    expect(body.found_in_other_boroughs).toEqual(["BRONX", "QUEENS"]);
+    expect(body.elsewhere).toBeUndefined();
+    const summaries = fetchMock.mock.calls.map((c) => c[0] as URL).filter((u) => u.pathname.includes("wvxf-dwi5"));
+    expect(summaries.every((u) => /boro='BROOKLYN'/.test(u.searchParams.get("$where") ?? ""))).toBe(true);
+  });
+
   it("a zero that is nowhere in the city says so, and the probe ran", async () => {
     fetchMock.mockResolvedValue(jsonResponse([]));
     const body = payload(await call("building_violations", { house_number: "99999", street: "Nowhere Street", borough: "Queens" }));
