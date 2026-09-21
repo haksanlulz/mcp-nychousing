@@ -799,6 +799,23 @@ async function tryHouseNumberVariants<T>(
  * zero; (2) the street field is substring-matched, so the shortest
  * distinctive fragment ("Sedgwick", not "Sedgwich Av") is the reliable form.
  */
+/**
+ * The rows are a page and the summary is the count; a payload that carries
+ * both without saying so gets its page read as the whole. Measured 2026-09-21
+ * through mcp-chat: the old 100-row default put ~31K tokens of NOV text into
+ * one model turn for a question the summary had already answered.
+ */
+function pageNote(returned: number, total: number, noun: string): string | undefined {
+  if (returned >= total) return undefined;
+  return `Showing the ${returned} newest of ${total} matching ${noun}; the summary counts all ${total}. Raise limit (up to ${MAX_RESULTS}) for more rows.`;
+}
+
+/** One `note` string from whichever sentences apply; undefined when none do. */
+function joinNotes(...parts: Array<string | undefined>): string | undefined {
+  const kept = parts.filter((p): p is string => typeof p === "string" && p.length > 0);
+  return kept.length ? kept.join(" ") : undefined;
+}
+
 function emptyBuildingNote(triedVariants: string[], street: string, elsewhere?: OtherBoroughs): string {
   const tried = triedVariants.length > 1 ? `Tried house-number spellings: ${triedVariants.join(", ")}. ` : "";
   const borough =
@@ -1272,7 +1289,7 @@ const TOOLS: Tool[] = [
         open_only: { type: "boolean", description: "Only violations still open (default false)." },
         violation_class: { type: "string", description: 'Filter to one class: "A", "B", "C", or "I".' },
         since: { type: "string", description: "Only violations inspected on/after this ISO date (YYYY-MM-DD)." },
-        limit: { type: "integer", description: `Max detail rows to return (1-${MAX_RESULTS}, default 100). The class summary counts all matches.` },
+        limit: { type: "integer", description: `Max detail rows to return (1-${MAX_RESULTS}, default 25). The class summary counts all matches; the rows are the newest page.` },
       },
       required: ["house_number", "street", "borough"],
       additionalProperties: false,
@@ -1293,7 +1310,7 @@ const TOOLS: Tool[] = [
         borough: { type: "string", description: BOROUGH_DESC },
         open_only: { type: "boolean", description: "Only complaints still open (default false)." },
         since: { type: "string", description: "Only problems received on/after this ISO date (YYYY-MM-DD)." },
-        limit: { type: "integer", description: `Max detail rows to return (1-${MAX_RESULTS}, default 100). The status summary counts all matches.` },
+        limit: { type: "integer", description: `Max detail rows to return (1-${MAX_RESULTS}, default 25). The status summary counts all matches; the rows are the newest page.` },
       },
       required: ["house_number", "street", "borough"],
       additionalProperties: false,
@@ -1493,7 +1510,7 @@ async function buildingViolations(args: Row): Promise<unknown> {
   const openOnly = args.open_only === true;
   const since = normSince(args.since, "since");
   const violationClass = str(args.violation_class);
-  const limit = clampLimit(args.limit, 100);
+  const limit = clampLimit(args.limit, 25);
 
   const buildWhere = (houseNumber: string, inBoro: Borough = boro): string | undefined => {
     const conditions = [
@@ -1564,11 +1581,14 @@ async function buildingViolations(args: Row): Promise<unknown> {
     summary: { total_matching: total, by_class: by },
     found_in_other_boroughs: elsewhere?.found,
     elsewhere: elsewhere?.redirected,
-    note: resolved.matchedVariant
-      ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
-      : total === 0
-        ? emptyBuildingNote(variants, street, elsewhere)
-        : undefined,
+    note: joinNotes(
+      resolved.matchedVariant
+        ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
+        : total === 0
+          ? emptyBuildingNote(variants, street, elsewhere)
+          : undefined,
+      pageNote(results.length, total, "violations"),
+    ),
     returned: results.length,
     results,
   };
@@ -1580,7 +1600,7 @@ async function buildingComplaints(args: Row): Promise<unknown> {
   const boro = resolveBorough(args.borough);
   const openOnly = args.open_only === true;
   const since = normSince(args.since, "since");
-  const limit = clampLimit(args.limit, 100);
+  const limit = clampLimit(args.limit, 25);
 
   const buildWhere = (houseNumber: string, inBoro: Borough = boro): string | undefined => {
     const conditions = [
@@ -1648,11 +1668,14 @@ async function buildingComplaints(args: Row): Promise<unknown> {
     summary: { total_matching: total, by_status: by },
     found_in_other_boroughs: elsewhere?.found,
     elsewhere: elsewhere?.redirected,
-    note: resolved.matchedVariant
-      ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
-      : total === 0
-        ? emptyBuildingNote(variants, street, elsewhere)
-        : undefined,
+    note: joinNotes(
+      resolved.matchedVariant
+        ? `No exact match for "${houseNumberInput}"; matched HPD's stored house number "${resolved.houseNumber}". NYC outer-borough addresses (especially Queens) are stored hyphenated, e.g. 120-15.`
+        : total === 0
+          ? emptyBuildingNote(variants, street, elsewhere)
+          : undefined,
+      pageNote(results.length, total, "complaint problems"),
+    ),
     returned: results.length,
     results,
   };

@@ -409,6 +409,30 @@ describe("building_violations", () => {
     expect(urlOf(1).searchParams.get("$order")).toBe("inspectiondate DESC");
   });
 
+  it("RED LEG: a page of rows says it is a page — default 25, and the note names the total", async () => {
+    // A 100-row default put ~31K tokens of NOV text into one model turn for a
+    // question the summary had already answered. The summary is the count; the
+    // rows are a page, and the payload has to say so or a reader treats the
+    // page as the whole.
+    fetchMock.mockResolvedValueOnce(jsonResponse(VIOLATION_SUMMARY)); // 1036 total
+    fetchMock.mockResolvedValueOnce(jsonResponse(Array.from({ length: 25 }, () => VIOLATION_ROW)));
+    const body = payload(await call("building_violations", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+    expect(urlOf(1).searchParams.get("$limit")).toBe("25");
+    expect(body.returned).toBe(25);
+    expect(body.summary.total_matching).toBe(1036);
+    expect(String(body.note)).toMatch(/25 newest of 1036 matching violations/);
+    expect(String(body.note)).toMatch(/summary counts all 1036/);
+    expect(String(body.note)).toMatch(/raise limit/i);
+  });
+
+  it("a page that holds every match carries no page note", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse([{ class: "C", n: "1" }]));
+    fetchMock.mockResolvedValueOnce(jsonResponse([VIOLATION_ROW]));
+    const body = payload(await call("building_violations", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+    expect(body.returned).toBe(1);
+    expect(body.note).toBeUndefined();
+  });
+
   it("applies open_only, class, and since filters to the query", async () => {
     fetchMock.mockResolvedValue(jsonResponse([])); // both calls
     await call("building_violations", {
@@ -792,6 +816,16 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
 // ---------------------------------------------------------------------------
 
 describe("building_complaints", () => {
+  it("RED LEG: a page of problems says it is a page — default 25, note names the total", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(COMPLAINT_SUMMARY)); // 128 total
+    fetchMock.mockResolvedValueOnce(jsonResponse(Array.from({ length: 25 }, () => COMPLAINT_ROW)));
+    const body = payload(await call("building_complaints", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
+    expect(urlOf(1).searchParams.get("$limit")).toBe("25");
+    expect(body.returned).toBe(25);
+    expect(String(body.note)).toMatch(/25 newest of 128 matching complaint problems/);
+    expect(String(body.note)).toMatch(/summary counts all 128/);
+  });
+
   it("returns an open/closed summary plus normalized problems", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(COMPLAINT_SUMMARY));
     fetchMock.mockResolvedValueOnce(jsonResponse([COMPLAINT_ROW]));
