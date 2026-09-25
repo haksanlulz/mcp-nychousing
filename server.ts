@@ -2605,9 +2605,11 @@ async function trueOwner(args: Row): Promise<unknown> {
 
   return {
     query: {
-      house_number: houseNumberInput,
-      // Which spelling actually found the lot, when it was not the one given.
-      house_number_searched: plutoResolved.matchedVariant ? plutoResolved.houseNumber : undefined,
+      // Same meaning as every other tool: house_number is the spelling that
+      // found the lot, house_number_searched the caller's own input when the
+      // two differ.
+      house_number: plutoResolved.matchedVariant ? plutoResolved.houseNumber : houseNumberInput,
+      house_number_searched: plutoResolved.matchedVariant ? houseNumberInput : undefined,
       street,
       borough: boro.text,
     },

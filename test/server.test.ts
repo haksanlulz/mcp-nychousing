@@ -1669,7 +1669,8 @@ describe("true_owner", () => {
       expect(body.found).toBe(true);
       expect(whereOf(0)).toContain("upper(address) like '7008 QUEENS BOULEVARD%'");
       expect(whereOf(1)).toContain("upper(address) like '70-08 QUEENS BOULEVARD%'");
-      expect(body.query.house_number_searched).toBe("70-08");
+      expect(body.query.house_number).toBe("70-08");
+      expect(body.query.house_number_searched).toBe("7008");
       expect(String(body.note)).toContain("70-08");
     });
 
@@ -2235,6 +2236,58 @@ describe("ux fixes 1.1.1", () => {
     const deedCall = fetchMock.mock.calls.find((c: unknown[]) => String((c[0] as URL).searchParams.get("$where") ?? "").includes("doc_type like 'DEED%'"));
     expect(deedCall).toBeDefined();
   });
+});
+
+// ---------------------------------------------------------------------------
+// query.house_number / query.house_number_searched carry ONE meaning in every
+// tool that retries house-number spellings: house_number is the spelling that
+// matched the record, house_number_searched is the caller's own input, present
+// only when the two differ. true_owner once published them the other way round,
+// so a caller reading house_number got a spelling that had matched nothing.
+// ---------------------------------------------------------------------------
+
+describe("house_number / house_number_searched: one meaning across tools", () => {
+  // Every query whose $where names the stored spelling "120-15" hits; every
+  // other query (the caller's literal "12015") is a silent zero. Aggregate
+  // queries get a count row, detail queries get a row carrying the address.
+  function hitOnlyTheStoredSpelling() {
+    fetchMock.mockImplementation(async (url: URL) => {
+      const where = url.searchParams.get("$where") ?? "";
+      if (!where.includes("120-15")) return jsonResponse([]);
+      if ((url.searchParams.get("$select") ?? "").includes("count(")) {
+        return jsonResponse([{ class: "A", complaint_status: "OPEN", casestatus: "OPEN", status: "OPEN", n: "1" }]);
+      }
+      return jsonResponse([
+        {
+          ...PLUTO_ROW,
+          address: "120-15 EXAMPLE STREET",
+          bbl: "4012340001.00000000",
+          housenumber: "120-15",
+          house_number: "120-15",
+          streetname: "EXAMPLE STREET",
+          registrationid: "1",
+        },
+      ]);
+    });
+  }
+
+  const TOOLS = [
+    "building_violations",
+    "building_complaints",
+    "who_owns",
+    "landlord_litigation",
+    "building_profile",
+    "true_owner",
+  ];
+
+  for (const tool of TOOLS) {
+    it(`${tool}: house_number is the matched spelling, house_number_searched the caller's input`, async () => {
+      hitOnlyTheStoredSpelling();
+      const body = payload(await call(tool, { house_number: "12015", street: "Example Street", borough: "Queens" }));
+      expect(body.query.house_number).toBe("120-15");
+      expect(body.query.house_number_searched).toBe("12015");
+    });
+  }
 });
 
 describe("response cache", () => {
