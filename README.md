@@ -291,7 +291,7 @@ The full record is the escape log in [GAUNTLET.md](GAUNTLET.md) §6. The short v
 - **Write outputs for the model reading them.** A correct zero for the wrong borough came back as "no match", and a chat model guessed the borough. The zero path now checks the other four boroughs and says where the address is. That should have been a design input, not a bug report.
 - **Generate the figures in this README.** The Testing counts went stale after every round that touched `server.ts` and were re-measured by hand each time. They belong in a script that CI checks.
 
-Still open: two of the three planned acceptance specs, the vitest version split with `mcp-fairrent`, and the npm publish.
+Still open: two of the three planned acceptance specs in GAUNTLET §5, and a check that the tool table in this README matches what `tools/list` returns.
 
 ## AI assistance
 

@@ -144,9 +144,9 @@ Re-ranked 2026-09-14: the README-install gap that sat at rank 1 is resolved — 
 
 1. **§5 holds one spec of a planned three, and §1 is stale in a way Claude cannot fix** — the operator's stated MUST-NEVER is authored, implemented and linked (2026-07-29). Slots 2 and 3 are open. §1's descriptive bullets are still transcribed from the README rather than elicited, and its done-definition sentence still describes the six 1.0 tools while ten ship; see the ⚠️ in §1. **Now the highest-value remaining item.**
 2. **README prose is unchecked.** The install path is covered, but the tool table, the worked example's figures and the dataset count are hand-maintained and rendered on LobeHub and Glama. Only the dataset count carries a checkable grep. A figure in the worked example going stale is low-severity (it is marked as a dated live run), a wrong tool name or argument in the table is not.
-3. **vitest version drift** — fairrent 2.1.9, the siblings 4.1.10, for no recorded reason.
+3. ~~**vitest version drift** — fairrent 2.1.9, the siblings 4.1.10, for no recorded reason.~~ **RESOLVED** — fairrent moved to 4.1.10 on 2026-07-30 (its GAUNTLET gap 4); all four civic repos read `^4.1.11` in `package.json` on 2026-10-13. This entry outlived the fix by ten weeks.
 4. **`smoke` is in-memory, not stdio.** `verify:pack` and `verify:mcpb` now cover the real-stdio channels, so smoke's remaining job is the live upstream contract. Its name oversells it.
-5. **Nothing is published yet.** The package is verified publishable and the bundle is verified launchable; `npm publish` is an operator action.
+5. ~~**Nothing is published yet.** The package is verified publishable and the bundle is verified launchable; `npm publish` is an operator action.~~ **RESOLVED** — `npm view @haksanlulz/mcp-nychousing version` returns `1.1.1` (2026-10-13). Whether a `.mcpb` is attached to a GitHub release was not checked.
 
 ## Dependency advisories
 
