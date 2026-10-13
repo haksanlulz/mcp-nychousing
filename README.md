@@ -256,7 +256,7 @@ There is no geocoding here. Address matching is literal against how HPD stores a
 ## Testing
 
 ```
-npm test         # vitest, fetch mocked (no network); 121 tests in 2 files
+npm test         # vitest, fetch mocked (no network); 139 tests in 2 files
 npm run smoke    # one live call per tool against SODA (keyless, no setup)
 npm run typecheck
 npm run verify:pack
@@ -265,21 +265,33 @@ npm run verify:mcpb
 
 `npm test` is the offline tier: `test/server.test.ts` stubs `globalThis.fetch` and drives every tool through an in-memory MCP client; `test/no-http-stack.test.ts` reads the source and pins that only the stdio transport is imported. `npm run smoke` is the live tier (real SODA calls, not run in CI). There are no test markers; the split is the two scripts.
 
-Counts, measured 2026-09-15:
+Counts, measured 2026-10-13:
 
 ```
-find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 2774 = 2782 app LOC (smoke.ts 139 is the live harness)
-find test -name '*.ts' | xargs wc -l                                                                           # 2306 test LOC
-npm test                                                                                                       # Tests 121 passed (121)
+find . -name '*.ts' -not -path './node_modules/*' -not -path './dist/*' -not -path './test/*' | xargs wc -l   # index.ts 8 + server.ts 3030 = 3038 app LOC (smoke.ts 139 is the live harness)
+find test -name '*.ts' | xargs wc -l                                                                           # 2532 test LOC
+npm test                                                                                                       # Tests 139 passed (139)
 ```
 
 What the tests cover, by layer: SoQL query construction (where clauses, LIKE escaping, borough aliases, Queens hyphenated house numbers, date validation) is asserted on the URL the mocked fetch receives. Tool responses (summaries, normalized rows, `found`/`note` fields, isError text) are asserted on the parsed payload. Transport behavior (app token and User-Agent headers, 5xx/429 retry counts, 4xx no-retry, non-JSON bodies, response cache hit/miss, IN() chunking at 100 ids) is asserted on call counts and request init.
 
-Mutation probe, re-run 2026-09-15: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. Three tests failed and 118 passed: `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3), and both `crossing the resolution ceiling on a chunk's short final page` cases, which report `buildings_found` 2000 instead of 2050 and print a ceiling note over a portfolio that was read in full, because one chunk of 200 ids reaches the ceiling on a full page instead of a short one. Source restored after the run.
+Mutation probe, re-run 2026-10-13: changed `PORTFOLIO_ID_CHUNK` in `server.ts` from 100 to 200 and ran `npm test`. Three tests failed and 136 passed: `landlord_portfolio > chunks large registration-id sets into multiple IN() queries` (expected 4 fetch calls, got 3), and both `crossing the resolution ceiling on a chunk's short final page` cases, which report `buildings_found` 2000 instead of 2050 and print a ceiling note over a portfolio that was read in full, because one chunk of 200 ids reaches the ceiling on a full page instead of a short one. Source restored after the run.
 
-Wiring assertions, 2026-09-15: 32 `toHaveBeenCalled*` sites. Most sit beside a payload or URL assertion on the same response; the ones that assert a call count alone do so because the count is the whole contract there: the response cache (repeat query = one fetch, different params = two fetches), the retry cap, and the house-number variant probes (a second spelling is attempted only after the first returns zero). Policy: assert behavior and payloads, never bare invocation.
+Wiring assertions, 2026-10-13: 33 `toHaveBeenCalled*` sites. Most sit beside a payload or URL assertion on the same response; the ones that assert a call count alone do so because the count is the whole contract there: the response cache (repeat query = one fetch, different params = two fetches), the retry cap, and the house-number variant probes (a second spelling is attempted only after the first returns zero). Policy: assert behavior and payloads, never bare invocation.
 
 The fetch stub honours `$limit` and `$offset`. A stub that returns every fixture row regardless of the query cannot fail on a paging or cap bug, which is how a portfolio truncation (a chunk capped at its own registration-id count) passed a green suite.
+
+## What I'd do differently
+
+The full record is the escape log in [GAUNTLET.md](GAUNTLET.md) §6. The short version:
+
+- **Measure the columns before writing a matcher.** Matching an address against free-text city columns took four fix rounds: first the house number (`20` matched `1520`), then the street token (`OCEAN AVENUE` matched `OCEAN PARKWAY`), then the street-type stem (`MORRIS AVENUE` matched `MORRIS PARK AVE`), then directionals (`BROADWAY` matched `WEST BROADWAY`). Each round fixed the case in front of it and missed the next one. Sampling the stored spellings first would have exposed all four at once.
+- **Make the mock able to fail.** The fetch stub originally ignored `$limit`, so a portfolio read that returned 1 of 87 buildings passed a green suite. The stub needed to honor paging from the first test.
+- **Test the channel users install through.** The first npm package build could not launch its own bin, and the first check meant to catch that bypassed the shim and passed anyway. Both `verify:pack` and `verify:mcpb` now launch the artifact the way a client does.
+- **Write outputs for the model reading them.** A correct zero for the wrong borough came back as "no match", and a chat model guessed the borough. The zero path now checks the other four boroughs and says where the address is. That should have been a design input, not a bug report.
+- **Generate the figures in this README.** The Testing counts went stale after every round that touched `server.ts` and were re-measured by hand each time. They belong in a script that CI checks.
+
+Still open: two of the three planned acceptance specs, the vitest version split with `mcp-fairrent`, and the npm publish.
 
 ## AI assistance
 
