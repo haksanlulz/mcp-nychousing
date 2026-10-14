@@ -281,18 +281,6 @@ Wiring assertions, 2026-10-13: 33 `toHaveBeenCalled*` sites. Most sit beside a p
 
 The fetch stub honours `$limit` and `$offset`. A stub that returns every fixture row regardless of the query cannot fail on a paging or cap bug, which is how a portfolio truncation (a chunk capped at its own registration-id count) passed a green suite.
 
-## What I'd do differently
-
-The full record is the escape log in [GAUNTLET.md](GAUNTLET.md) §6. The short version:
-
-- **Measure the columns before writing a matcher.** Matching an address against free-text city columns took four fix rounds: first the house number (`20` matched `1520`), then the street token (`OCEAN AVENUE` matched `OCEAN PARKWAY`), then the street-type stem (`MORRIS AVENUE` matched `MORRIS PARK AVE`), then directionals (`BROADWAY` matched `WEST BROADWAY`). Each round fixed the case in front of it and missed the next one. Sampling the stored spellings first would have exposed all four at once.
-- **Make the mock able to fail.** The fetch stub originally ignored `$limit`, so a portfolio read that returned 1 of 87 buildings passed a green suite. The stub needed to honor paging from the first test.
-- **Test the channel users install through.** The first npm package build could not launch its own bin, and the first check meant to catch that bypassed the shim and passed anyway. Both `verify:pack` and `verify:mcpb` now launch the artifact the way a client does.
-- **Write outputs for the model reading them.** A correct zero for the wrong borough came back as "no match", and a chat model guessed the borough. The zero path now checks the other four boroughs and says where the address is. That should have been a design input, not a bug report.
-- **Generate the figures in this README.** The Testing counts went stale after every round that touched `server.ts` and were re-measured by hand each time. They belong in a script that CI checks.
-
-Still open: two of the three planned acceptance specs in GAUNTLET §5, and a check that the tool table in this README matches what `tools/list` returns.
-
 ## AI assistance
 
 This project was built with AI assistance (Claude). Correctness was established by the mocked vitest suite, by running every tool live against NYC Open Data (`npm run smoke`; the Queens hyphenated-house-number, NY/NYC borough, and litigation-summary fixes all came from live behavior, not mocks), and by typecheck. The author reviews the code and is accountable for it.
