@@ -479,6 +479,28 @@ describe("building_violations", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each(["2026-02-30", "2025-02-29", "2026-04-31", "2026-13-01", "0000-01-01"])(
+    "rejects impossible calendar date %s before querying", async (since) => {
+      fetchMock.mockResolvedValue(jsonResponse([]));
+      for (const name of ["building_violations", "building_complaints", "eviction_lookup", "building_311"]) {
+        const args = name.startsWith("building_") && name !== "building_311"
+          ? { house_number: "1520", street: "Sedgwick", borough: "Bronx", since }
+          : { address: "1520 Sedgwick", borough: "Bronx", since };
+        const res: any = await call(name, args);
+        expect(res.isError).toBe(true);
+        expect(res.content[0].text).toMatch(/real calendar date/);
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("accepts a leap day without shifting it", async () => {
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const res: any = await call("eviction_lookup", { borough: "Bronx", since: "2024-02-29" });
+    expect(res.isError).not.toBe(true);
+    expect(whereOf(0)).toContain("2024-02-29T00:00:00");
+  });
+
   // A tool call with the city-wide "NYC"/"NY" must error, not silently query
   // Manhattan and report it as if it were the whole city.
   it("does not silently treat NYC/NY as Manhattan; errors before any network call", async () => {
@@ -736,8 +758,8 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
   it("RED LEG: a zero in the wrong borough names the borough(s) where the address IS registered", async () => {
     fetchMock.mockImplementation(async (url: URL) => {
       const where = url.searchParams.get("$where") ?? "";
-      // the cross-borough probe: registrations, boro != BROOKLYN, grouped
-      if (url.pathname.includes("tesw-yqqr") && /boro\s*!=/.test(where)) {
+      // the city-wide registration probe includes the searched borough too
+      if (url.pathname.includes("tesw-yqqr") && url.searchParams.get("$group") === "boro") {
         return jsonResponse([{ boro: "BRONX", n: "1" }]);
       }
       return jsonResponse([]);
@@ -750,6 +772,31 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
     expect(body.found_in_other_boroughs).toEqual(["BRONX"]);
   });
 
+  it.each(["building_violations", "building_complaints"])(
+    "%s does not redirect a filtered zero away from a registered building", async (name) => {
+      fetchMock.mockImplementation(async (url: URL) => {
+        if (url.pathname.includes("tesw-yqqr")) {
+          const rows = [{ boro: "BRONX", n: "1" }, { boro: "BROOKLYN", n: "1" }];
+          // Honour the old exclusion so this reproduces the actual blind spot.
+          const excluded = /boro\s*!=\s*'([^']+)'/.exec(url.searchParams.get("$where") ?? "")?.[1];
+          return jsonResponse(rows.filter((r) => r.boro !== excluded));
+        }
+        return jsonResponse([]);
+      });
+      const body = payload(await call(name, {
+        house_number: "1", street: "Main", borough: "Bronx", open_only: true, since: "2026-01-01",
+      }));
+      expect(body.summary.total_matching).toBe(0);
+      expect(body.note).toMatch(/registered with HPD in BRONX/);
+      expect(body.note).toMatch(/filters/);
+      expect(body.note).not.toMatch(/borough is almost certainly wrong|not registered.*any borough/);
+      expect(body.elsewhere).toBeUndefined();
+      const dataCalls = fetchMock.mock.calls.map((c) => c[0] as URL)
+        .filter((u) => !u.pathname.includes("tesw-yqqr"));
+      expect(dataCalls).toHaveLength(1);
+    },
+  );
+
   // The note alone was measured NOT to be enough for a small local model: told
   // "registered in BRONX, not BROOKLYN", it narrated the Brooklyn zero as the
   // Bronx answer, twice, under two prompt wordings (2026-09-20). A redirect is
@@ -759,7 +806,7 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
   it("RED LEG: with one other borough, the response carries that borough's summary under the caller's own filters", async () => {
     fetchMock.mockImplementation(async (url: URL) => {
       const where = url.searchParams.get("$where") ?? "";
-      if (url.pathname.includes("tesw-yqqr") && /boro\s*!=/.test(where)) return jsonResponse([{ boro: "BRONX", n: "1" }]);
+      if (url.pathname.includes("tesw-yqqr") && url.searchParams.get("$group") === "boro") return jsonResponse([{ boro: "BRONX", n: "1" }]);
       if (url.pathname.includes("wvxf-dwi5") && /boro='BRONX'/.test(where)) {
         // the redirected summary must carry the caller's open_only filter
         expect(where).toMatch(/violationstatus/);
@@ -776,7 +823,7 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
   it("with two other boroughs, no summary is fetched inline — the caller must choose", async () => {
     fetchMock.mockImplementation(async (url: URL) => {
       const where = url.searchParams.get("$where") ?? "";
-      if (url.pathname.includes("tesw-yqqr") && /boro\s*!=/.test(where)) return jsonResponse([{ boro: "BRONX", n: "1" }, { boro: "QUEENS", n: "2" }]);
+      if (url.pathname.includes("tesw-yqqr") && url.searchParams.get("$group") === "boro") return jsonResponse([{ boro: "BRONX", n: "1" }, { boro: "QUEENS", n: "2" }]);
       return jsonResponse([]);
     });
     const body = payload(await call("building_violations", { house_number: "1", street: "Main", borough: "Brooklyn" }));
@@ -793,7 +840,7 @@ describe("house-number hyphenation (Queens silent-zero)", () => {
     expect(String(body.note)).toMatch(/not registered with HPD in any borough/);
     const probes = fetchMock.mock.calls.map((c) => c[0] as URL).filter((u) => u.pathname.includes("tesw-yqqr"));
     expect(probes.length).toBe(1);
-    expect(probes[0].searchParams.get("$where")).toMatch(/boro\s*!=\s*'QUEENS'/);
+    expect(probes[0].searchParams.get("$where")).not.toMatch(/boro\s*!=/);
   });
 
   it("building_violations reports zero when no variant matches", async () => {

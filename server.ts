@@ -709,6 +709,10 @@ function normSince(v: unknown, label: string): string | undefined {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     throw new Error(`${label} must be an ISO date (YYYY-MM-DD); got ${JSON.stringify(v)}.`);
   }
+  const date = new Date(`${s}T00:00:00Z`);
+  if (s.startsWith("0000-") || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== s) {
+    throw new Error(`${label} must be a real calendar date (YYYY-MM-DD); got ${JSON.stringify(v)}.`);
+  }
   return `${s}T00:00:00`;
 }
 
@@ -818,6 +822,11 @@ function joinNotes(...parts: Array<string | undefined>): string | undefined {
 
 function emptyBuildingNote(triedVariants: string[], street: string, elsewhere?: OtherBoroughs): string {
   const tried = triedVariants.length > 1 ? `Tried house-number spellings: ${triedVariants.join(", ")}. ` : "";
+  if (elsewhere?.registeredInSearched) {
+    return `No rows matched these filters. ${tried}This house number and street ARE registered with HPD in ` +
+      `${elsewhere.searched}. Check the date, status, or class filters before changing the borough. ` +
+      "Registration does not establish whether violations or complaints exist.";
+  }
   const borough =
     elsewhere === undefined
       ? "Check the borough. "
@@ -839,6 +848,7 @@ function emptyBuildingNote(triedVariants: string[], street: string, elsewhere?: 
 type OtherBoroughs = {
   searched: string;
   found: string[];
+  registeredInSearched: boolean;
   /** One sentence of the other borough's own numbers, when exactly one other borough holds the address. */
   inline?: string;
   /** The redirected result itself, for the response body. */
@@ -848,8 +858,9 @@ type OtherBoroughs = {
 /**
  * The commonest wrong-input zero is the wrong borough, and it is the one zero
  * the server can rescue by itself: HPD registrations list every registered
- * building with its borough, so one grouped query over the other four says
- * where the address actually is. Found live 2026-09-20 through a chat client:
+ * building with its borough, so one grouped query over all five says where
+ * the address is registered. Include the searched borough: filtered zeroes
+ * do not establish that a building is absent there. Found live 2026-09-20 through a chat client:
  * a local model asked about "1520 Sedgwick" with no borough guessed BROOKLYN,
  * got a correct zero, and reported "no match" — the building is in the BRONX
  * and nothing in the response could have said so. Every house-number spelling
@@ -872,13 +883,17 @@ async function otherBoroughsWithAddress(
     const hn = houseNumberVariants.map((v) => eqTextCI("housenumber", v));
     const rows = await sodaGet(DATASET.registrations, {
       $select: "boro,count(1) as n",
-      $where: whereAnd([`(${hn.join(" OR ")})`, `boro != '${soql(boro.text)}'`, likeCI("streetname", street)]),
+      $where: whereAnd([`(${hn.join(" OR ")})`, likeCI("streetname", street)]),
       $group: "boro",
       $order: "boro",
     });
     const found = rows.map((r) => str(r.boro)).filter((b): b is string => !!b && (num(rows.find((x) => str(x.boro) === b)?.n) ?? 0) > 0);
-    const out: OtherBoroughs = { searched: boro.text, found: [...new Set(found)] };
-    if (redirect && out.found.length === 1 && BOROUGHS[out.found[0]!]) {
+    const out: OtherBoroughs = {
+      searched: boro.text,
+      found: [...new Set(found)].filter((b) => b !== boro.text),
+      registeredInSearched: found.includes(boro.text),
+    };
+    if (redirect && !out.registeredInSearched && out.found.length === 1 && BOROUGHS[out.found[0]!]) {
       try {
         const other = BOROUGHS[out.found[0]!]!;
         const r = await redirect(other);
