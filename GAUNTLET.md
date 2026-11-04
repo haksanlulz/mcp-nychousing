@@ -180,3 +180,10 @@ Re-ranked 2026-09-14: the README-install gap that sat at rank 1 is resolved — 
 ### 2026-09-21 — fix round 6: the rows were a page and nothing said so, seen on a token counter
 
 **mcp-chat's per-turn strip showed turn 2 of the 1520 Sedgwick question prefilled ~31K prompt tokens, and the summary had already answered the question in turn 1.** `building_violations` returned 100 NOV rows by default — each carrying its legal-text `description` — under a `summary` that already counted all 123, and the payload had no sentence saying the rows were a page. A reader with the count in hand still got the whole page, and a reader without the note could take 100 rows as the whole. **Rung:** default `limit` 25 for `building_violations` and `building_complaints` (the schema descriptions say so and say the rows are the newest page); when `returned < total`, `note` carries *"Showing the 25 newest of 123 matching violations; the summary counts all 123. Raise limit (up to 500) for more rows."* — joined with the spelling/borough notes when both apply, absent when the page holds every match. `landlord_litigation` keeps 100: cases per building are few and it already carried its own page sentence. Found by an instrument (the turn strip), not by a wrong answer — the answer was right and expensive. Six mutations red, 133/133.
+
+
+### 2026-11-04 — Local release preparation (gpt-6-astra)
+
+Prepared 1.2.0; Add opt-in dated building activity timelines with per-source coverage and original record links. Building snapshots and multi-address comparisons are available in the separate local Civic Workbench. Package and bundle checks are required before this local candidate is considered ready. No publication, push or deployment is authorized in this task.
+
+Verification outcome (gpt-6-astra): 155 tests; typecheck/build, clean npm installation, bundle startup/list and all ten live source tools passed. No publish, push or deploy.

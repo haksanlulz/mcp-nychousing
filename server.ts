@@ -3058,7 +3058,7 @@ export function createServer(): Server {
   // module-resolution wrinkle under NodeNext. A client or registry reading
   // serverInfo.version had been getting 1.1.0 from a 1.1.1 package.
   const server = new Server(
-    { name: "mcp-nychousing", version: "1.1.1" },
+    { name: "mcp-nychousing", version: "1.2.0" },
     { capabilities: { tools: {} } },
   );
 
