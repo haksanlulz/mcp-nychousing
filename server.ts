@@ -1429,13 +1429,16 @@ const TOOLS: Tool[] = [
       "(Handyman Work Order) charge count. START HERE for any 'tell me about this building' " +
       "question, then drill into building_violations / building_complaints / landlord_litigation / " +
       "dob_building / building_311 / true_owner for detail. Give the house number, street, and " +
-      "borough. Makes ~11 sequential city-API calls (a few seconds). Keyless.",
+      "borough. Makes ~11 sequential city-API calls (a few seconds). Set include_timeline for a merged dated history of violations, complaint problems, litigation openings, and executed evictions (four extra calls). Keyless.",
     inputSchema: {
       type: "object",
       properties: {
         house_number: { type: "string", description: 'Building house number, e.g. "1520".' },
         street: { type: "string", description: "Street name (matched case-insensitively as a substring)." },
         borough: { type: "string", description: BOROUGH_DESC },
+        include_timeline: { type: "boolean", description: "Include a newest-first activity timeline with per-source coverage (default false)." },
+        timeline_limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum merged events (default 20). Requires include_timeline=true." },
+        timeline_since: { type: "string", description: "Only timeline events dated on or after YYYY-MM-DD; profile totals remain unfiltered. Requires include_timeline=true." },
       },
       required: ["house_number", "street", "borough"],
       additionalProperties: false,
@@ -2207,10 +2210,61 @@ async function evictionLookup(args: Row): Promise<unknown> {
   };
 }
 
+async function buildingTimeline(sources: Array<{
+  name: string; dataset: string; where: string | undefined; dateField: string;
+  idField: string; dateType: string; normalize: (row: Row) => Row;
+}>, limit: number, since?: string) {
+  const events: Array<{ date: string; date_type: string; source: string; source_url: string; record_id: string | null; summary: string | null; record: Row }> = [];
+  const coverage: Record<string, Row> = {};
+  let partial = false;
+  let moreAvailable = false;
+  for (const source of sources) {
+    const sourceUrl = `https://data.cityofnewyork.us/resource/${source.dataset}.json`;
+    try {
+      const rows = await sodaGet(source.dataset, {
+        $where: whereAnd([source.where ?? "", `${source.dateField} IS NOT NULL`, ...(since ? [gteDate(source.dateField, since)] : [])]),
+        $order: `${source.dateField} DESC`, $limit: limit + 1,
+      });
+      let undated = 0;
+      for (const row of rows) {
+        const date = str(row[source.dateField]);
+        let validDate = false;
+        try { validDate = !!date && !!normSince(date.slice(0, 10), source.dateField) && Number.isFinite(Date.parse(date)); } catch { /* disclose below */ }
+        if (!validDate || !date) { undated++; continue; }
+        const record = source.normalize(row);
+        events.push({ date, date_type: source.dateType, source: source.name, source_url: sourceUrl,
+          record_id: str(row[source.idField]),
+          summary: str(record.description) ?? str(record.major_category) ?? str(record.case_type) ?? str(record.eviction_address),
+          record,
+        });
+      }
+      coverage[source.name] = { available: true, fetched: rows.length, more_than_limit: rows.length > limit, undated_returned: undated, source_url: sourceUrl };
+      moreAvailable ||= rows.length > limit;
+      partial ||= undated > 0;
+    } catch (error) {
+      partial = true;
+      coverage[source.name] = { available: false, error: error instanceof Error ? error.message : String(error), source_url: sourceUrl };
+    }
+  }
+  events.sort((a, b) => b.date.localeCompare(a.date) || a.source.localeCompare(b.source) || (a.record_id ?? "").localeCompare(b.record_id ?? ""));
+  moreAvailable ||= events.length > limit;
+  return {
+    events: events.slice(0, limit), returned: Math.min(events.length, limit), limit,
+    since: since?.slice(0, 10) ?? null, partial, more_available: moreAvailable, sources: coverage,
+    note: "Dated records, newest first; undated records are excluded. Complaint events are problem rows, so one complaint may appear more than once. Dates are inspections, complaint receipts, case openings, or marshal executions: case openings are not court outcomes, and executed evictions are not filings. Status fields show the dataset's current record, not necessarily its status on the event date. Profile totals remain unfiltered by timeline_since. A partial timeline or no events does not establish that nothing happened; inspect source coverage and use the detail tools.",
+  };
+}
+
 async function buildingProfile(args: Row): Promise<unknown> {
   const houseNumberInput = reqStr(args.house_number, "house_number");
   const street = reqStr(args.street, "street");
   const boro = resolveBorough(args.borough);
+  if (args.include_timeline !== undefined && typeof args.include_timeline !== "boolean") throw new Error("include_timeline must be a boolean.");
+  const includeTimeline = args.include_timeline === true;
+  if (!includeTimeline && (args.timeline_limit !== undefined || args.timeline_since !== undefined)) throw new Error("timeline_limit and timeline_since require include_timeline=true.");
+  const timelineLimit = args.timeline_limit === undefined ? 20 : args.timeline_limit;
+  if (typeof timelineLimit !== "number" || !Number.isInteger(timelineLimit) || timelineLimit < 1 || timelineLimit > 100) throw new Error("timeline_limit must be an integer from 1 to 100.");
+  const timelineSince = normSince(args.timeline_since, "timeline_since");
 
   // Resolve the canonical HPD house-number spelling ONCE (Queens hyphenation),
   // then reuse it for every HPD-keyed dataset below.
@@ -2224,25 +2278,28 @@ async function buildingProfile(args: Row): Promise<unknown> {
   const { contacts, filings: contactFilings, truncated: contactsTruncated } = await registrationContacts(regIds.slice(0, 5));
 
   // HPD violations by class.
+  const violationWhere = whereAnd([eqTextCI("housenumber", hn), eqText("boro", boro.text), likeCI("streetname", street)]);
   const violSummary = await sodaGet(DATASET.violations, {
     $select: "class,count(1) as n",
-    $where: whereAnd([eqTextCI("housenumber", hn), eqText("boro", boro.text), likeCI("streetname", street)]),
+    $where: violationWhere,
     $group: "class",
   });
   const violations = tally(violSummary, "class");
 
   // HPD complaints by status.
+  const complaintWhere = whereAnd([eqTextCI("house_number", hn), eqText("borough", boro.text), likeCI("street_name", street)]);
   const compSummary = await sodaGet(DATASET.complaints, {
     $select: "complaint_status,count(1) as n",
-    $where: whereAnd([eqTextCI("house_number", hn), eqText("borough", boro.text), likeCI("street_name", street)]),
+    $where: complaintWhere,
     $group: "complaint_status",
   });
   const complaints = tally(compSummary, "complaint_status");
 
   // HPD litigation by status (boroid is numeric here).
+  const litigationWhere = whereAnd([eqTextCI("housenumber", hn), eqNum("boroid", boro.id), likeCI("streetname", street)]);
   const litSummary = await sodaGet(DATASET.litigations, {
     $select: "casestatus,count(1) as n",
-    $where: whereAnd([eqTextCI("housenumber", hn), eqNum("boroid", boro.id), likeCI("streetname", street)]),
+    $where: litigationWhere,
     $group: "casestatus",
   });
   const litigation = tally(litSummary, "casestatus");
@@ -2351,6 +2408,12 @@ async function buildingProfile(args: Row): Promise<unknown> {
     emergencyRepairCharges === 0;
   const profileVariants = houseNumberVariants(houseNumberInput, { hyphenateDigits: boro.text === "QUEENS" });
   const elsewhere = foundNothing ? await otherBoroughsWithAddress(profileVariants, street, boro) : undefined;
+  const timeline = includeTimeline ? await buildingTimeline([
+    { name: "hpd_violations", dataset: DATASET.violations, where: violationWhere, dateField: "inspectiondate", idField: "violationid", dateType: "inspection", normalize: normViolation },
+    { name: "hpd_complaints", dataset: DATASET.complaints, where: complaintWhere, dateField: "received_date", idField: "problem_id", dateType: "complaint_received", normalize: normComplaint },
+    { name: "hpd_litigation", dataset: DATASET.litigations, where: litigationWhere, dateField: "caseopendate", idField: "litigationid", dateType: "case_opened", normalize: normLitigation },
+    { name: "executed_evictions", dataset: DATASET.evictions, where: evictWhere, dateField: "executed_date", idField: "court_index_number", dateType: "eviction_executed", normalize: normEviction },
+  ], timelineLimit, timelineSince) : undefined;
 
   return {
     query: {
@@ -2360,6 +2423,7 @@ async function buildingProfile(args: Row): Promise<unknown> {
       borough: boro.text,
     },
     registered_with_hpd: registrations.length > 0,
+    activity_timeline: timeline,
     registrations,
     contacts,
     contact_filings: contactFilings,

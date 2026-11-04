@@ -91,16 +91,20 @@ async function main(): Promise<void> {
 
   await check(
     "building_profile",
-    bldg,
+    { ...bldg, include_timeline: true, timeline_limit: 8, timeline_since: "2020-01-01" },
     (b) =>
       b.registered_with_hpd === true &&
       typeof b.hpd_violations?.total === "number" &&
       typeof b.hpd_complaints?.total === "number" &&
-      typeof b.evictions_executed === "number",
+      typeof b.evictions_executed === "number" &&
+      b.activity_timeline?.returned > 0 && b.activity_timeline.returned <= 8 &&
+      b.activity_timeline.partial === false &&
+      b.activity_timeline.events.every((e: any, i: number, events: any[]) =>
+        e.date >= "2020-01-01" && (i === 0 || events[i - 1].date >= e.date)),
     (b) =>
       `viol ${b.hpd_violations.total}, compl ${b.hpd_complaints.total}, lit ${b.hpd_litigation.total}, ` +
       `evict ${b.evictions_executed}, AEP ${b.aep.in_program_history}, vacate ${b.vacate_orders.length}, ` +
-      `bedbug ${b.bedbug_filings.length}, HWO ${b.emergency_repair_charges}`,
+      `bedbug ${b.bedbug_filings.length}, HWO ${b.emergency_repair_charges}; timeline ${b.activity_timeline.returned} dated events`,
   );
 
   await check(

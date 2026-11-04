@@ -1807,6 +1807,75 @@ describe("true_owner", () => {
 });
 
 describe("building_profile", () => {
+  describe("activity timeline", () => {
+    const address = { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" };
+    function mockTimeline(options: { fail?: string; undated?: boolean } = {}) {
+      fetchMock.mockImplementation(async (url: URL) => {
+        const id = url.pathname.split("/").at(-1)!.replace(".json", "");
+        const rows: Record<string, unknown[]> = {
+          "wvxf-dwi5": [{ ...VIOLATION_ROW, inspectiondate: options.undated ? null : "2026-07-04T00:00:00.000" }],
+          "ygpa-z7cr": [COMPLAINT_ROW], "59kj-x8nc": [LITIGATION_ROWS[0]], "6z8x-wfk4": [EVICTION_ROW],
+        };
+        if (id === "tesw-yqqr") return jsonResponse([REGISTRATION_ROW]);
+        if (url.searchParams.has("$select")) return jsonResponse([]);
+        if (id === options.fail) return jsonResponse({ error: true, message: "source unavailable" }, { ok: false, status: 400 });
+        return jsonResponse(rows[id] ?? []);
+      });
+    }
+
+    it("merges dated agency records newest-first with source links and distinct event meanings", async () => {
+      mockTimeline();
+      const body = payload(await call("building_profile", { ...address, include_timeline: true }));
+      expect(body.activity_timeline.events.map((e: any) => e.source)).toEqual(["hpd_violations", "hpd_complaints", "executed_evictions", "hpd_litigation"]);
+      expect(body.activity_timeline.events[0]).toMatchObject({ date_type: "inspection", record_id: VIOLATION_ROW.violationid });
+      expect(body.activity_timeline.events[0].source_url).toContain("wvxf-dwi5");
+      expect(body.activity_timeline.events[1].record.problem_id).toBe(COMPLAINT_ROW.problem_id);
+      expect(body.activity_timeline).toMatchObject({ returned: 4, partial: false, more_available: false });
+      expect(body.activity_timeline.note).toMatch(/not court outcomes/);
+      expect(body.activity_timeline.note).toMatch(/not.*filings/);
+    });
+
+    it("limits the merged timeline and applies a since filter at every source", async () => {
+      mockTimeline();
+      const body = payload(await call("building_profile", { ...address, include_timeline: true, timeline_limit: 2, timeline_since: "2018-01-01" }));
+      expect(body.activity_timeline.events).toHaveLength(2);
+      expect(body.activity_timeline.more_available).toBe(true);
+      const queries = fetchMock.mock.calls.map((c: any[]) => c[0] as URL).filter((u: URL) =>
+        ["wvxf-dwi5", "ygpa-z7cr", "59kj-x8nc", "6z8x-wfk4"].some((id) => u.pathname.includes(id)) && !u.searchParams.has("$select"));
+      expect(queries).toHaveLength(4);
+      for (const query of queries) {
+        expect(query.searchParams.get("$limit")).toBe("3");
+        expect(query.searchParams.get("$where")).toContain(">= '2018-01-01T00:00:00'");
+        expect(query.searchParams.get("$where")).toContain("IS NOT NULL");
+      }
+    });
+
+    it("preserves the profile and other events when a timeline source fails", async () => {
+      mockTimeline({ fail: "59kj-x8nc" });
+      const body = payload(await call("building_profile", { ...address, include_timeline: true }));
+      expect(body.registered_with_hpd).toBe(true);
+      expect(body.activity_timeline.partial).toBe(true);
+      expect(body.activity_timeline.events).toHaveLength(3);
+      expect(body.activity_timeline.sources.hpd_litigation.error).toContain("source unavailable");
+    });
+
+    it("discloses records that cannot be placed on the timeline", async () => {
+      mockTimeline({ undated: true });
+      const body = payload(await call("building_profile", { ...address, include_timeline: true }));
+      expect(body.activity_timeline.events).toHaveLength(3);
+      expect(body.activity_timeline.partial).toBe(true);
+      expect(body.activity_timeline.sources.hpd_violations.undated_returned).toBe(1);
+    });
+
+    it.each([{ include_timeline: "yes" }, { include_timeline: true, timeline_limit: 0 }, { timeline_limit: 5 }, { include_timeline: true, timeline_since: "2026-02-30" }])(
+      "rejects invalid timeline controls before querying: %j", async (options) => {
+        const result = await call("building_profile", { ...address, ...options });
+        expect(result.isError).toBe(true);
+        expect(fetchMock).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   it("aggregates the nine sections from one resolved address", async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse([REGISTRATION_ROW])) // resolveBuilding: registrations
@@ -1823,6 +1892,7 @@ describe("building_profile", () => {
     const body = payload(await call("building_profile", { house_number: "1520", street: "Sedgwick Avenue", borough: "Bronx" }));
 
     expect(body.registered_with_hpd).toBe(true);
+    expect(body.activity_timeline).toBeUndefined();
     expect(body.hpd_violations.total).toBe(1036);
     expect(body.hpd_violations.by_class.C).toBe(281);
     expect(body.hpd_complaints.by_status.OPEN).toBe(8);

@@ -72,6 +72,12 @@ Check: `test/server.test.ts` (tagged `spec: no-implied-outcome`), three cases �
 
 ## §6 Escape log
 
+### 2026-11-04 — Optional building activity timeline (gpt-6-astra)
+
+`building_profile` could show counts but not a cross-source chronology. Its opt-in timeline now merges dated HPD inspections, complaint problem receipts, litigation openings, and executed evictions, preserving each record and its date meaning. Bounded per-source queries reuse the existing address predicates. Source failures leave the profile and other sources readable, with explicit coverage; invalid dates are omitted and disclosed. The timeline limit and inclusive date filter do not alter profile totals. Default calls incur no extra queries.
+
+Eight new cases cover ordering, record provenance, source failure, invalid returned dates, date/limit validation, and opt-in requirements; the four feature cases failed before implementation. Final: **155 tests passed**, typecheck/build passed, and all ten live smoke tools passed. A compiled stdio call for 1520 Sedgwick, Bronx returned the requested three newest events, all four sources available, `partial: false`, and `more_available: true`. No tool names or packaging changed; local only.
+
 ### 2026-11-03 — filtered zeroes and calendar dates (gpt-6-astra)
 
 A zero under `since`, `open_only`, or class filters did not establish that the address was unregistered in the searched borough. The rescue query excluded that borough anyway, then described a same-address registration elsewhere as proof the caller chose the wrong borough. It now checks registrations across all five in the same single query and suppresses the redirect when the searched borough has a match. Impossible calendar dates are refused before querying all four `since` tools.
