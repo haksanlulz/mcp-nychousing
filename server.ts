@@ -3052,6 +3052,31 @@ function withRecordScope(name: string, result: unknown): unknown {
   return { ...(result as Record<string, unknown>), record_scope: scope };
 }
 
+// MCP security audit 2026-11-25: every tool declares its hints; withAnnotations
+// refuses to list a tool that has none, so a new tool cannot ship unclassified.
+// Every tool here only reads, from NYC open-data's public API (open world).
+const READ_REMOTE = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+const TOOL_ANNOTATIONS: Record<string, typeof READ_REMOTE> = {
+  building_violations: READ_REMOTE,
+  building_311: READ_REMOTE,
+  building_complaints: READ_REMOTE,
+  who_owns: READ_REMOTE,
+  landlord_portfolio: READ_REMOTE,
+  landlord_litigation: READ_REMOTE,
+  eviction_lookup: READ_REMOTE,
+  building_profile: READ_REMOTE,
+  true_owner: READ_REMOTE,
+  dob_building: READ_REMOTE,
+};
+
+function withAnnotations<T extends { name: string }>(tools: T[]): (T & { annotations: (typeof TOOL_ANNOTATIONS)[string] })[] {
+  return tools.map((t) => {
+    const annotations = TOOL_ANNOTATIONS[t.name];
+    if (!annotations) throw new Error(`tool ${t.name} has no annotations: add it to TOOL_ANNOTATIONS`);
+    return { ...t, annotations };
+  });
+}
+
 export function createServer(): Server {
   // Kept equal to package.json by a test that reads both, rather than a runtime
   // JSON import: cheaper, equally effective, and it keeps the runtime free of a
@@ -3062,7 +3087,7 @@ export function createServer(): Server {
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: withAnnotations(TOOLS) }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
