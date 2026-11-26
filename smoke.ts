@@ -12,8 +12,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "./server.js";
 
 function parse(result: any) {
-  if (result?.isError) throw new Error(result.content?.[0]?.text ?? "tool returned isError");
-  return JSON.parse(result.content[0].text);
+  if (result?.isError) throw new Error(result.content?.[1]?.text ?? "tool returned isError");
+  return JSON.parse(result.content[1].text);
 }
 
 async function main(): Promise<void> {

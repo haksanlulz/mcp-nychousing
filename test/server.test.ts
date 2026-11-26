@@ -292,7 +292,7 @@ async function call(name: string, args: Record<string, unknown>) {
   return client.callTool({ name, arguments: args });
 }
 function payload(result: any) {
-  return JSON.parse(result.content[0].text);
+  return JSON.parse(result.content[1].text);
 }
 
 beforeEach(() => clearSodaCache());
@@ -472,21 +472,21 @@ describe("building_violations", () => {
   it("errors (no network) when a required address part is missing", async () => {
     const res: any = await call("building_violations", { house_number: "1520", borough: "Bronx" });
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/street is required/i);
+    expect(res.content[1].text).toMatch(/street is required/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects an unknown argument with a near-miss, before any network call", async () => {
     const res: any = await call("building_violations", { house_number: "1", street: "X", borough: "Bronx", sinse: "2026-01-01" });
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/building_violations does not accept "sinse" \(did you mean "since"\?\)/);
+    expect(res.content[1].text).toMatch(/building_violations does not accept "sinse" \(did you mean "since"\?\)/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects a malformed since date without calling the API", async () => {
     const res: any = await call("building_violations", { house_number: "1", street: "X", borough: "Bronx", since: "01/2026" });
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/YYYY-MM-DD/);
+    expect(res.content[1].text).toMatch(/YYYY-MM-DD/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -499,7 +499,7 @@ describe("building_violations", () => {
           : { address: "1520 Sedgwick", borough: "Bronx", since };
         const res: any = await call(name, args);
         expect(res.isError).toBe(true);
-        expect(res.content[0].text).toMatch(/real calendar date/);
+        expect(res.content[1].text).toMatch(/real calendar date/);
       }
       expect(fetchMock).not.toHaveBeenCalled();
     },
@@ -518,8 +518,8 @@ describe("building_violations", () => {
     for (const borough of ["NYC", "NY"]) {
       const res: any = await call("building_violations", { house_number: "1520", street: "Sedgwick Avenue", borough });
       expect(res.isError).toBe(true);
-      expect(res.content[0].text).toMatch(/ambiguous|whole city/i);
-      expect(res.content[0].text).not.toMatch(/MANHATTAN'/); // no silent Manhattan substitution
+      expect(res.content[1].text).toMatch(/ambiguous|whole city/i);
+      expect(res.content[1].text).not.toMatch(/MANHATTAN'/); // no silent Manhattan substitution
     }
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -1216,7 +1216,7 @@ describe("landlord_portfolio", () => {
   it("requires a name (error, no network)", async () => {
     const res: any = await call("landlord_portfolio", {});
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/name is required/i);
+    expect(res.content[1].text).toMatch(/name is required/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -1416,14 +1416,14 @@ describe("landlord_litigation", () => {
   it("requires a building or a respondent (error, no network)", async () => {
     const res: any = await call("landlord_litigation", {});
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/building.*or.*respondent/i);
+    expect(res.content[1].text).toMatch(/building.*or.*respondent/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects a partial building lookup (house number without street)", async () => {
     const res: any = await call("landlord_litigation", { house_number: "1694", borough: "Bronx" });
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/house_number, street, and borough/i);
+    expect(res.content[1].text).toMatch(/house_number, street, and borough/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -1454,7 +1454,7 @@ describe("eviction_lookup", () => {
   it("requires at least one selector (error, no network)", async () => {
     const res: any = await call("eviction_lookup", {});
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/court_index_number, address, or borough/i);
+    expect(res.content[1].text).toMatch(/court_index_number, address, or borough/i);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -1508,8 +1508,8 @@ describe("app token + error handling", () => {
     );
     const res: any = await call("eviction_lookup", { borough: "Bronx" });
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toContain("500");
-    expect(res.content[0].text).toContain("boom");
+    expect(res.content[1].text).toContain("500");
+    expect(res.content[1].text).toContain("boom");
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -1535,7 +1535,7 @@ describe("app token + error handling", () => {
     fetchMock.mockResolvedValueOnce(textResponse("<html>maintenance</html>"));
     const res: any = await call("eviction_lookup", { borough: "Bronx" });
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toContain("non-JSON");
+    expect(res.content[1].text).toContain("non-JSON");
   });
 
   it("rejects an unknown tool with a protocol error", async () => {
@@ -2495,8 +2495,8 @@ describe("environment knob validation", () => {
       // A NaN cap skips the loop body entirely: no request is made and the
       // handler renders the undefined `last` as "Error: undefined".
       expect(fetchMock).toHaveBeenCalledTimes(3);
-      expect(res.content[0].text).toContain("upstream wobble");
-      expect(res.content[0].text).not.toMatch(/undefined/);
+      expect(res.content[1].text).toContain("upstream wobble");
+      expect(res.content[1].text).not.toMatch(/undefined/);
     },
     30_000,
   );

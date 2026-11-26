@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "mcp-nychousing",
   "display_name": "NYC Housing Data",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "Read NYC Open Data for one building or one landlord: HPD violations, complaints, registration and litigation, DOB records, 311 heat complaints, marshal evictions, and ownership two ways (HPD registration and the property record).",
   "long_description": "A read-only MCP server over NYC Open Data (Socrata/SODA) for tenant organizers, housing-court legal-aid intake, and Right-to-Counsel orgs. Ten tools cover a building's condition, its registered owner and agent, the recorded deed behind them, the rest of that landlord's portfolio, and the building's court and eviction history. No account and no key are required; an optional Socrata app token only raises the per-IP rate limit.",
   "author": {
