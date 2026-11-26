@@ -335,6 +335,17 @@ describe("tool registration", () => {
     ]);
     for (const t of tools) expect(t.inputSchema.type).toBe("object");
   });
+
+  // The dispatch table is a plain object literal, so every Object.prototype member resolved as a "tool":
+  // "constructor" answered isError:false with the caller's own arguments, a made-up city record presented as a
+  // real one (MCP security audit 2026-11-25; mcp-courtwatch had the same bug and the same fix).
+  it.each(["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__", "isPrototypeOf"])(
+    "does not dispatch the inherited property %s as a tool",
+    async (name) => {
+      await expect(call(name, { violations: [{ class: "C" }] })).rejects.toThrow(/Unknown tool/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("borough resolution + SoQL escaping (unit)", () => {

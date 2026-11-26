@@ -3066,7 +3066,9 @@ export function createServer(): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    const handler = HANDLERS[name];
+    // An own-property check: HANDLERS is a plain object, so "constructor", "toString" and the rest of
+    // Object.prototype were found here and answered as tools (MCP security audit 2026-11-25).
+    const handler = Object.prototype.hasOwnProperty.call(HANDLERS, name) ? HANDLERS[name] : undefined;
     if (!handler) {
       throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
