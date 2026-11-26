@@ -154,6 +154,13 @@ const PORTFOLIO_BUILDING_CAP = MAX_RESULTS * 4;
 function optionalToken(): string | null {
   const raw = process.env.NYC_APP_TOKEN?.trim();
   if (!raw || raw.includes("${")) return null;
+  // Node's fetch refuses a header value holding a line break and quotes the whole value in its error,
+  // which reaches the model (MCP security audit 2026-11-25). Refuse it here, never quoting it.
+  if (!/^[\x21-\x7e]+$/.test(raw)) {
+    throw new Error(
+      "NYC_APP_TOKEN holds a character a request header cannot carry (a space, line break or control character). Set it again with the token alone, or unset it.",
+    );
+  }
   return raw;
 }
 
