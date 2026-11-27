@@ -1,0 +1,397 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "311 service requests for an address. Defaults to the heat/hot-water complaint types (the top tenant-side habitability signal, and a record HPD complaint data undercounts); pass complaint_type to search any other type instead (e.g. \"UNSANITARY CONDITION\", \"PAINT/PLASTER\", \"Rodent\", \"General Construction/Plumbing\"). Returns matching requests newest-first plus a by-status summary. Give the street address and borough. Keyless.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "description": "Street address, e.g. \"1520 SEDGWICK AVENUE\" (matched case-insensitively as a substring of the 311 incident address).",
+          "type": "string"
+        },
+        "borough": {
+          "description": "NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5).",
+          "type": "string"
+        },
+        "complaint_type": {
+          "description": "Optional 311 complaint type (exact, case-insensitive). Omit for the heat/hot-water types.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max requests to return (1-500, default 50).",
+          "type": "integer"
+        },
+        "since": {
+          "description": "Only requests created on/after this ISO date (YYYY-MM-DD).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "address",
+        "borough"
+      ],
+      "type": "object"
+    },
+    "name": "building_311"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "HPD complaints and problems for one building (dataset ygpa-z7cr; one row per reported problem within a complaint). Give the house number, street, and borough. Returns an open/closed count summary plus the most recent matching problems (category, status, dates). Street is matched as an uppercase substring; house number exactly. Keyless.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "borough": {
+          "description": "NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5).",
+          "type": "string"
+        },
+        "house_number": {
+          "description": "Building house number, e.g. \"1520\".",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max detail rows to return (1-500, default 25). The status summary counts all matches; the rows are the newest page.",
+          "type": "integer"
+        },
+        "open_only": {
+          "description": "Only complaints still open (default false).",
+          "type": "boolean"
+        },
+        "since": {
+          "description": "Only problems received on/after this ISO date (YYYY-MM-DD).",
+          "type": "string"
+        },
+        "street": {
+          "description": "Street name (matched case-insensitively as a substring).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "house_number",
+        "street",
+        "borough"
+      ],
+      "type": "object"
+    },
+    "name": "building_complaints"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "One-call condition-and-history profile of a building, aggregating ten city datasets: HPD registration + contacts (who is on file), violation counts by class, complaint counts by status, HPD litigation counts by status, marshal-executed eviction count, Alternative Enforcement Program status, vacate orders, the latest bedbug filings, and HPD emergency-repair (Handyman Work Order) charge count. START HERE for any 'tell me about this building' question, then drill into building_violations / building_complaints / landlord_litigation / dob_building / building_311 / true_owner for detail. Give the house number, street, and borough. Makes ~11 sequential city-API calls (a few seconds). Set include_timeline for a merged dated history of violations, complaint problems, litigation openings, and executed evictions (four extra calls). Keyless.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "borough": {
+          "description": "NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5).",
+          "type": "string"
+        },
+        "house_number": {
+          "description": "Building house number, e.g. \"1520\".",
+          "type": "string"
+        },
+        "include_timeline": {
+          "description": "Include a newest-first activity timeline with per-source coverage (default false).",
+          "type": "boolean"
+        },
+        "street": {
+          "description": "Street name (matched case-insensitively as a substring).",
+          "type": "string"
+        },
+        "timeline_limit": {
+          "description": "Maximum merged events (default 20). Requires include_timeline=true.",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "timeline_since": {
+          "description": "Only timeline events dated on or after YYYY-MM-DD; profile totals remain unfiltered. Requires include_timeline=true.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "house_number",
+        "street",
+        "borough"
+      ],
+      "type": "object"
+    },
+    "name": "building_profile"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "HPD Housing Maintenance Code violations for one building (dataset wvxf-dwi5). Give the house number, street, and borough. Returns a server-side per-class count summary (class A non-hazardous, B hazardous, C immediately hazardous, I informational) plus the most recent matching violations. Street is matched as an uppercase substring; house number is matched exactly. Keyless; an optional NYC_APP_TOKEN only raises the rate limit.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "borough": {
+          "description": "NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5).",
+          "type": "string"
+        },
+        "house_number": {
+          "description": "Building house number, e.g. \"1520\".",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max detail rows to return (1-500, default 25). The class summary counts all matches; the rows are the newest page.",
+          "type": "integer"
+        },
+        "open_only": {
+          "description": "Only violations still open (default false).",
+          "type": "boolean"
+        },
+        "since": {
+          "description": "Only violations inspected on/after this ISO date (YYYY-MM-DD).",
+          "type": "string"
+        },
+        "street": {
+          "description": "Street name, e.g. \"Sedgwick Avenue\" (matched case-insensitively as a substring).",
+          "type": "string"
+        },
+        "violation_class": {
+          "description": "Filter to one class: \"A\", \"B\", \"C\", or \"I\".",
+          "type": "string"
+        }
+      },
+      "required": [
+        "house_number",
+        "street",
+        "borough"
+      ],
+      "type": "object"
+    },
+    "name": "building_violations"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Department of Buildings records for one building — a DIFFERENT agency from HPD: construction, structural, elevator, boiler, permit, and illegal-conversion issues live here, not in HPD datasets. Returns DOB violations (with a by-category summary) and DOB complaints (with a by-status summary). Give the house number, street, and borough. DOB dates arrive in the agency's raw formats (often YYYYMMDD) and are returned as published. Keyless.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "borough": {
+          "description": "NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5).",
+          "type": "string"
+        },
+        "house_number": {
+          "description": "Building house number, e.g. \"1520\".",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max rows per section (1-500, default 50).",
+          "type": "integer"
+        },
+        "street": {
+          "description": "Street name (matched case-insensitively as a substring).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "house_number",
+        "street",
+        "borough"
+      ],
+      "type": "object"
+    },
+    "name": "dob_building"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Marshal-executed evictions (dataset 6z8x-wfk4). IMPORTANT: this dataset lists evictions a city marshal actually CARRIED OUT, not filings, warrants, or pending housing-court cases. Look up by court index number OR by address and/or borough. At least one is required. Returns court index number, address, executed date, marshal, and residential/commercial flag. Address is matched as a case-insensitive substring of the combined eviction address. Keyless.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "description": "Address substring to match, e.g. \"123 Example Avenue\" (matched within the combined eviction address).",
+          "type": "string"
+        },
+        "borough": {
+          "description": "NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5).",
+          "type": "string"
+        },
+        "court_index_number": {
+          "description": "Housing-court index number to match exactly, e.g. \"123456/24\".",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max rows to return (1-500, default 50).",
+          "type": "integer"
+        },
+        "since": {
+          "description": "Only evictions executed on/after this ISO date (YYYY-MM-DD).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "eviction_lookup"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "HPD Housing Litigations (dataset 59kj-x8nc): HPD-initiated cases against landlords plus tenant actions. Look up by building (house_number + street + borough) OR by respondent (landlord/owner) name. At least one is required. Returns case type, open date, status, judgement, any harassment finding, penalty, and respondent, with a by-status summary. Respondent and street are matched as case-insensitive substrings. Keyless.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "borough": {
+          "description": "NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5). Required for a building lookup.",
+          "type": "string"
+        },
+        "case_status": {
+          "description": "Optional status filter, e.g. \"OPEN\" or \"CLOSED\".",
+          "type": "string"
+        },
+        "house_number": {
+          "description": "Building house number (building lookup; requires street + borough too).",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max cases to return (1-500, default 100).",
+          "type": "integer"
+        },
+        "respondent": {
+          "description": "Respondent name to match, e.g. an LLC or owner (substring, e.g. \"realty llc\").",
+          "type": "string"
+        },
+        "street": {
+          "description": "Street name (building lookup; matched as a substring).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "landlord_litigation"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "The reverse of who_owns: every building currently registered with HPD under a given landlord, corporation, officer, or agent name. Searches HPD Registration Contacts (feu5-w2e2) for the name (case-insensitive substring against corporation names and person first/last names), then resolves each matched registration to its building (tesw-yqqr): address, borough, zip, BIN, registration dates, and which contact matched. Start from a name surfaced by who_owns or landlord_litigation. Landlords often hold each building in a separate LLC; officer and agent person names frequently connect buildings the LLC names hide. Reflects current HPD registration filings only. Keyless.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "borough": {
+          "description": "Optional filter: only buildings in this borough. NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5).",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Max buildings to return (1-500, default 50).",
+          "type": "integer"
+        },
+        "name": {
+          "description": "Owner / corporation / officer / agent name to match, e.g. \"WFHA 1520 SEDGWICK LP\" or \"DANA REYES\" (case-insensitive substring against HPD registration-contact names; pass the fullest name you have, short fragments over-match).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "landlord_portfolio"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Ownership from the city's PROPERTY records rather than HPD's self-reported filings: the Department of Finance assessment-roll owner (PLUTO), the building's recent recorded deeds and mortgages with their named parties (ACRIS), and any Speculation Watch List hit (a qualifying flip-risk purchase). Complements who_owns: HPD registration says who the landlord TOLD HPD they are; this says what the property record shows. Give the house number, street, and borough. PLUTO stores ONE combined address line per tax lot and it is matched from the house number forward, so a corner or multi-lot building can return more than one lot; assessor_owner, latest_deed and speculation_watch all describe the FIRST one, named in assessor_owner_lot_address. NOTE: ACRIS covers Manhattan, Bronx, Brooklyn, and Queens; Staten Island deeds are recorded with the Richmond County Clerk and will not appear. Keyless.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "borough": {
+          "description": "NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5).",
+          "type": "string"
+        },
+        "docs_limit": {
+          "description": "Max recent ACRIS documents to return (1-25, default 8).",
+          "type": "integer"
+        },
+        "house_number": {
+          "description": "Building house number, e.g. \"1520\". Must be the start of PLUTO's address line; hyphenated and de-hyphenated outer-borough spellings are both tried.",
+          "type": "string"
+        },
+        "street": {
+          "description": "Street name (matched case-insensitively as a substring).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "house_number",
+        "street",
+        "borough"
+      ],
+      "type": "object"
+    },
+    "name": "true_owner"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Who is on file with HPD for a building, the 'who do I actually serve' tool. Joins HPD Registrations (tesw-yqqr) to Registration Contacts (feu5-w2e2) by registration id. Give the house number, street, and borough. Returns the registration(s) and every contact (corporate/individual owner, head officer, officer, agent, site manager) with names and business addresses. Reflects HPD registration filings, which can lag reality. Keyless.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "borough": {
+          "description": "NYC borough: Manhattan, Bronx, Brooklyn, Queens, or Staten Island (also accepts MN/BX/BK/QN/SI or 1-5).",
+          "type": "string"
+        },
+        "house_number": {
+          "description": "Building house number, e.g. \"1520\".",
+          "type": "string"
+        },
+        "street": {
+          "description": "Street name (matched case-insensitively as a substring).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "house_number",
+        "street",
+        "borough"
+      ],
+      "type": "object"
+    },
+    "name": "who_owns"
+  }
+]
