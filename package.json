@@ -59,5 +59,10 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": {
+      "zod": "^4.6.7"
+    }
   }
 }
